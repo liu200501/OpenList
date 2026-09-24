@@ -33,7 +33,7 @@ jobs:
         run: git tag -d beta
         continue-on-error: true
 
-      - name: changelog # or changelogithub@0.12 if ensure the stable result
+      - name: changelog
         id: changelog
         run: |
           git tag -l
@@ -56,7 +56,7 @@ jobs:
           name: beta changelog
           path: ${{ github.workspace }}/CHANGELOG.md
           compression-level: 0
-          if-no-files-found: error # 'warn' or 'ignore' are also available, defaults to `warn`
+          if-no-files-found: error
 
   release:
     needs:
@@ -64,41 +64,41 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: "!(*musl*|*windows-arm64*|*windows7-*|*android*|*freebsd*)" # xgo and loongarch (exclude mips64le)
+          - target: "!(*musl*|*windows-arm64*|*windows7-*|*android*|*freebsd*)"
             hash: "md5"
             flags: ""
             goflags: ""
-          - target: "linux-(mips|mips64|mipsle|mips64le|loong64)-musl*" # musl-compat-family
+          - target: "linux-(mips|mips64|mipsle|mips64le|loong64)-musl*"
             hash: "md5-linux-musl-mips"
             flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
             goflags: ""
             musl_static: "true"
-          - target: "linux-!(arm*|mips|mips64|mipsle|mips64le|loong64)-musl*" # musl-not-arm (exclude compat-family)
+          - target: "linux-!(arm*|mips|mips64|mipsle|mips64le|loong64)-musl*"
             hash: "md5-linux-musl"
             flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
             goflags: ""
             musl_static: "true"
-          - target: "linux-arm*-musl*" #musl-arm
+          - target: "linux-arm*-musl*"
             hash: "md5-linux-musl-arm"
             flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
             goflags: ""
             musl_static: "true"
-          - target: "windows-arm64" #win-arm64
+          - target: "windows-arm64"
             hash: "md5-windows-arm64"
             flags: ""
             goflags: ""
             musl_static: "false"
-          - target: "windows7-*" #win7
+          - target: "windows7-*"
             hash: "md5-windows7"
             flags: ""
             goflags: "-tags=sqlite_cgo_compat"
             musl_static: "false"
-          - target: "android-*" #android
+          - target: "android-*"
             hash: "md5-android"
             flags: ""
             goflags: ""
             musl_static: "false"
-          - target: "freebsd-*" #freebsd
+          - target: "freebsd-*"
             hash: "md5-freebsd"
             flags: ""
             goflags: ""
@@ -117,11 +117,32 @@ jobs:
         with:
           go-version: "1.27.1"
 
-      - name: Setup web
-        run: bash build.sh dev web
+      # ===== 改动点：手动拉取 feat/advanced-transfer-seeds 分支的前端并编译 =====
+      - name: Setup web (advanced-transfer-seeds branch)
+        run: |
+          set -e
+          # 克隆指定分支的前端源码
+          git clone --depth 1 -b feat/advanced-transfer-seeds \
+            https://github.com/OpenListTeam/OpenList-Frontend.git frontend-src
+          cd frontend-src
+
+          # 启用 corepack（OpenList-Frontend 用 pnpm）
+          corepack enable
+
+          # 安装依赖并构建
+          pnpm install --frozen-lockfile
+          pnpm build
+
+          # 将产物放到后端嵌入目录
+          cd ..
+          rm -rf public/dist
+          mkdir -p public/dist
+          cp -r frontend-src/dist/* public/dist/
+
+          echo "Frontend built from feat/advanced-transfer-seeds branch:"
+          ls -la public/dist | head -20
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
       - name: Build
         uses: OpenListTeam/cgo-actions@6fcace5934c36d70503dba06e2396bb58b766130 # v1.2.5
@@ -139,7 +160,7 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling-advanced-transfer-seeds
         env:
           GOFLAGS: ${{ matrix.goflags }}
 
@@ -190,4 +211,4 @@ jobs:
           name: beta builds for ${{ env.cleaned_target }}
           path: ${{ github.workspace }}/build/compress/*
           compression-level: 0
-          if-no-files-found: error # 'warn' or 'ignore' are also available, defaults to `warn`
+          if-no-files-found: error
