@@ -91,22 +91,30 @@ jobs:
             https://github.com/OpenListTeam/OpenList-Frontend.git frontend-src
           cd frontend-src
 
+          # 拉取 upstream main 的语言目录（只覆盖语言文件，不动 Seed 功能代码）
           git remote add upstream https://github.com/OpenListTeam/OpenList-Frontend.git
           git fetch --depth 1 upstream main
           git checkout upstream/main -- src/lang || true
 
           corepack enable
           pnpm install --frozen-lockfile
-          pnpm build
 
+          # 用官方 build.sh 构建，包含 i18n 步骤
+          chmod +x build.sh
+          bash build.sh --dev --no-compress
+
+          # 找构建产物目录，并拷贝到后端的 public/dist
+          echo "===== frontend-src 目录结构 ====="
+          ls -la
           cd ..
           rm -rf public/dist
           mkdir -p public/dist
-          cp -r frontend-src/dist/* public/dist/
+          cp -r frontend-src/dist/* public/dist/ 2>/dev/null || \
+          cp -r frontend-src/build/* public/dist/ 2>/dev/null || \
+          cp -r frontend-src/out/* public/dist/ 2>/dev/null || true
 
-          echo "Frontend built from feat/advanced-transfer-seeds + upstream lang:"
-          ls -la public/dist | head -20
-          ls -la public/dist/lang 2>/dev/null | head -10 || true
+          echo "===== public/dist 内容 ====="
+          ls -la public/dist | head -30
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
