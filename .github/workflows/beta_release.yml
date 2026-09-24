@@ -84,15 +84,18 @@ jobs:
         with:
           go-version: "1.27.1"
 
-      - name: Setup web (advanced-transfer-seeds branch)
+      - name: Setup web (advanced-transfer-seeds branch + upstream lang)
         run: |
           set -e
           git clone --depth 1 -b feat/advanced-transfer-seeds \
             https://github.com/OpenListTeam/OpenList-Frontend.git frontend-src
           cd frontend-src
 
-          corepack enable
+          git remote add upstream https://github.com/OpenListTeam/OpenList-Frontend.git
+          git fetch --depth 1 upstream main
+          git checkout upstream/main -- src/lang || true
 
+          corepack enable
           pnpm install --frozen-lockfile
           pnpm build
 
@@ -101,8 +104,9 @@ jobs:
           mkdir -p public/dist
           cp -r frontend-src/dist/* public/dist/
 
-          echo "Frontend built from feat/advanced-transfer-seeds branch:"
+          echo "Frontend built from feat/advanced-transfer-seeds + upstream lang:"
           ls -la public/dist | head -20
+          ls -la public/dist/lang 2>/dev/null | head -10 || true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
