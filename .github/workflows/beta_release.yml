@@ -62,6 +62,7 @@ jobs:
     needs:
       - changelog
     strategy:
+    fail-fast: false        # ← 加这一行
       matrix:
         include:
           - target: "!(*musl*|*windows-arm64*|*windows7-*|*android*|*freebsd*)"
