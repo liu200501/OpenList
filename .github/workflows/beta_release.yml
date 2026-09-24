@@ -118,23 +118,18 @@ jobs:
         with:
           go-version: "1.27.1"
 
-      # ===== 改动点：手动拉取 feat/advanced-transfer-seeds 分支的前端并编译 =====
       - name: Setup web (advanced-transfer-seeds branch)
         run: |
           set -e
-          # 克隆指定分支的前端源码
           git clone --depth 1 -b feat/advanced-transfer-seeds \
             https://github.com/OpenListTeam/OpenList-Frontend.git frontend-src
           cd frontend-src
 
-          # 启用 corepack（OpenList-Frontend 用 pnpm）
           corepack enable
 
-          # 安装依赖并构建
           pnpm install --frozen-lockfile
           pnpm build
 
-          # 将产物放到后端嵌入目录
           cd ..
           rm -rf public/dist
           mkdir -p public/dist
