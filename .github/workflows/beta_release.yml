@@ -1,34 +1,7 @@
-name: Beta Release builds
-
-on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: write
-
-jobs:
   release:
-    strategy:
-      matrix:
-        include:
-          - target: "windows-arm64" # win-arm64
-            hash: "md5-windows-arm64"
-            flags: ""
-            goflags: ""
-            musl_static: "false"
-          - target: "windows7-*" # win7
-            hash: "md5-windows7"
-            flags: ""
-            goflags: "-tags=sqlite_cgo_compat"
-            musl_static: "false"
-
-    name: Beta Release
+    needs:
+      - changelog
+    name: Beta Release (Windows amd64)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,29 +20,25 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
-      - name: Build
-        uses: OpenListTeam/cgo-actions@d760a8ec1a6be1f8ec181229e11cb2671797f9e0 # v1.3.0
-        with:
-          targets: ${{ matrix.target }}
-          flags: ${{ matrix.flags || '-ldflags=' }}
-          static-link-for-musl: true
-          musl-target-format: $os-$musl-$arch
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          out-dir: build
-          output: openlist-$target$ext
-          musl-base-url: "https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
-          x-flags: |
-            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+      - name: Build Windows amd64
+        run: |
+          mkdir -p build
+          go build -o build/openlist-windows-amd64.exe \
+            -ldflags="-w -s \
+              -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$(date +'%F %T %z')' \
+              -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>' \
+              -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$(git log --pretty=format:'%h' -1)' \
+              -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=beta' \
+              -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
+            -tags=jsoniter .
         env:
-          GOFLAGS: ${{ matrix.goflags }}
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
 
       - name: Compress
         run: |
-          bash build.sh zip ${{ matrix.hash }}
+          bash build.sh zip md5-windows-amd64.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -77,26 +46,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view beta; then
-            gh release create beta --prerelease --title "Beta" --notes "Beta release"
-          fi
           for file in build/compress/*; do
             gh release upload beta "$file" --clobber
           done
 
-      - name: Clean illegal characters from matrix.target
-        id: clean_target_name
-        run: |
-          ILLEGAL_CHARS_REGEX='[":<>|*?\\/\r\n]'
-          CLEANED_TARGET=$(echo "${{ matrix.target }}" | sed -E "s/$ILLEGAL_CHARS_REGEX//g")
-          echo "Original target: ${{ matrix.target }}"
-          echo "Cleaned target: $CLEANED_TARGET"
-          echo "cleaned_target=$CLEANED_TARGET" >> $GITHUB_ENV
-
       - name: Upload assets to github artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: beta builds for ${{ env.cleaned_target }}
+          name: beta builds for windows-amd64
           path: ${{ github.workspace }}/build/compress/*
           compression-level: 0
           if-no-files-found: error
