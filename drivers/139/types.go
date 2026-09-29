@@ -435,3 +435,31 @@ type CreateBatchOprTaskResp struct {
 	} `json:"result"`
 	TaskID string `json:"taskID"`
 }
+
+// ============================================================
+// ★ 新增：videoPreview/getPreviewInfo 响应结构
+// ============================================================
+
+type VideoPreviewResp struct {
+	BaseResp
+	Data struct {
+		FileID string `json:"fileId"`
+		Meta   struct {
+			Duration     string  `json:"duration"` // 单位：秒，字符串
+			Width        int     `json:"width"`
+			Height       int     `json:"height"`
+			TakenAt      *string `json:"takenAt"`
+			LivePhoto    bool    `json:"livePhoto"`
+			Make         *string `json:"make"`
+			Model        *string `json:"model"`
+			DolbyVision  bool    `json:"dolbyVision"`
+			MultiChannel bool    `json:"multiChannel"`
+		} `json:"meta"`
+		PreviewInfo struct {
+			Status string `json:"status"`
+			URL    string `json:"url"`
+		} `json:"previewInfo"`
+		ErrorCode interface{} `json:"errorCode"`
+		Message   interface{} `json:"message"`
+	} `json:"data"`
+}
