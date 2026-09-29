@@ -304,6 +304,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 		return
 	}
 	var rawURL string
+	var extraHeader string
 
 	storage, err := fs.GetStorage(reqPath, &fs.GetStoragesArgs{})
 	provider, ok := model.GetProvider(obj)
@@ -328,11 +329,9 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 					query)
 			}
 		} else {
-			// file have raw url
 			if url, ok := model.GetUrl(obj); ok {
 				rawURL = url
 			} else {
-				// if storage is not proxy, use raw url by fs.Link
 				link, _, err := fs.Link(c.Request.Context(), reqPath, model.LinkArgs{
 					IP:       c.ClientIP(),
 					Header:   c.Request.Header,
@@ -344,6 +343,13 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 				}
 				defer link.Close()
 				rawURL = link.URL
+				if link.Header != nil {
+					for _, k := range []string{"X-Video-Duration"} {
+						if v := link.Header.Get(k); v != "" {
+							extraHeader += k + ": " + v + "\n"
+						}
+					}
+				}
 			}
 		}
 	}
@@ -358,6 +364,16 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
 	mountDetails, _ := model.GetStorageDetails(obj)
+
+	respHeader := getHeader(meta, reqPath)
+	if extraHeader != "" {
+		if respHeader != "" {
+			respHeader += "\n" + extraHeader
+		} else {
+			respHeader = extraHeader
+		}
+	}
+
 	common.SuccessResp(c, FsGetResp{
 		ObjResp: ObjResp{
 			Name:         obj.GetName(),
@@ -374,7 +390,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 		},
 		RawURL:   rawURL,
 		Readme:   getReadme(meta, reqPath),
-		Header:   getHeader(meta, reqPath),
+		Header:   respHeader,
 		Provider: provider,
 		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
 	})
