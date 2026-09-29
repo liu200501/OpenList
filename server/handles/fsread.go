@@ -1,9 +1,12 @@
 package handles
 
 import (
+	"context"
 	"fmt"
 	stdpath "path"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -44,6 +47,8 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
+	// ★ 新增：视频时长（秒），非视频或未取到时为 0
+	Duration float64 `json:"duration,omitempty"`
 }
 
 type FsListResp struct {
@@ -225,6 +230,47 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 	return total, objs[start:end]
 }
 
+// ============================================================
+// ★ 新增：视频时长进程内缓存 + 从 Link.Header 取时长
+// ============================================================
+
+// listDurationCache 缓存 path -> duration（秒），避免重复请求
+var listDurationCache sync.Map
+
+// getVideoDuration 调用 fs.Link 拿 X-Video-Duration
+// 只对视频文件有效，且只对 MetaPersonalNew 生效
+func getVideoDuration(ctx context.Context, reqPath string) float64 {
+	// 1) 读缓存
+	if v, ok := listDurationCache.Load(reqPath); ok {
+		if f, ok := v.(float64); ok {
+			return f
+		}
+	}
+
+	// 2) 调 fs.Link
+	link, _, err := fs.Link(ctx, reqPath, model.LinkArgs{})
+	if err != nil {
+		return 0
+	}
+	defer link.Close()
+
+	if link.Header == nil {
+		return 0
+	}
+	durStr := link.Header.Get("X-Video-Duration")
+	if durStr == "" {
+		return 0
+	}
+	dur, err := strconv.ParseFloat(durStr, 64)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+
+	// 3) 写缓存
+	listDurationCache.Store(reqPath, dur)
+	return dur
+}
+
 func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 	var resp []ObjResp
 	for _, obj := range objs {
@@ -242,6 +288,9 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
+			// ★ 列表接口不主动取时长，duration 保持 0
+			// 前端点击按钮后单独调 /api/fs/get 逐个填充
+			Duration: 0,
 		})
 	}
 	return resp
@@ -387,6 +436,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			Thumb:        thumb,
 			MountDetails: mountDetails,
+			Duration:     0,
 		},
 		RawURL:   rawURL,
 		Readme:   getReadme(meta, reqPath),
