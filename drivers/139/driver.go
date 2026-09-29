@@ -600,8 +600,9 @@ func (d *Yun139) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 			"sourceContentIDs": sourceContentIDs,
 		}
 
-		var resp base.Json
+		var resp base.Json // Assuming a generic JSON response for success/failure
 		_, err = d.andAlbumRequest(pathname, body, &resp)
+		// For now, we assume no error means success.
 	default:
 		err = errs.NotImplement
 	}
@@ -954,4 +955,169 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 				"accountType": 1,
 			},
 		}
-		pathname := "/orchestration/personalCloud/uploadAndDownload/v1.0/pcUploadFile
+		pathname := "/orchestration/personalCloud/uploadAndDownload/v1.0/pcUploadFileRequest"
+		if d.isFamily() || d.isGroup() {
+			uploadPath := d.dirPath(dstDir)
+			// 共享群的根目录上传路径为 0
+			if d.isGroup() && dstDir.GetID() == d.RootFolderID {
+				uploadPath = "0"
+			}
+			data = d.newJson(base.Json{
+				"fileCount":    1,
+				"manualRename": 2,
+				"operation":    0,
+				"path":         uploadPath,
+				"seqNo":        random.String(32), // 序列号不能为空
+				"totalSize":    reportSize,
+				"uploadContentList": []base.Json{{
+					"contentName": stream.GetName(),
+					"contentSize": reportSize,
+					// "digest": "5a3231986ce7a6b46e408612d385bafa"
+				}},
+			})
+			pathname = "/orchestration/familyCloud-rebuild/content/v1.0/getFileUploadURL"
+		}
+		var resp UploadResp
+		log.Debugf("[139] upload request body: %+v", data)
+		_, err = d.post(pathname, data, &resp)
+		if err != nil {
+			return err
+		}
+		if resp.Data.Result.ResultCode != "0" {
+			return fmt.Errorf("get file upload url failed with result code: %s, message: %s", resp.Data.Result.ResultCode, resp.Data.Result.ResultDesc)
+		}
+
+		size := stream.GetSize()
+		partSize := d.getPartSize(size)
+
+		// Progress
+		p := driver.NewProgress(size, up)
+		rateLimited := driver.NewLimitedUploadStream(ctx, stream)
+
+		// StreamSectionReader for per-chunk buffering and retry
+		ss, err := streamPkg.NewStreamSectionReader(&streamPkg.FileStream{
+			Ctx:    ctx,
+			Reader: rateLimited,
+			Obj:    &model.Object{Size: size},
+		}, int(partSize), &up)
+		if err != nil {
+			return err
+		}
+
+		part := int64(1)
+		if size > partSize {
+			part = (size + partSize - 1) / partSize
+		}
+		for i := int64(0); i < part; i++ {
+			if utils.IsCanceled(ctx) {
+				return ctx.Err()
+			}
+			start := i * partSize
+			byteSize := min(size-start, partSize)
+
+			rd, getErr := ss.GetSectionReader(start, byteSize)
+			if getErr != nil {
+				return getErr
+			}
+
+			err = retry.Do(
+				func() error {
+					if _, err := rd.Seek(0, io.SeekStart); err != nil {
+						return err
+					}
+					req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, resp.Data.UploadResult.RedirectionURL,
+						io.TeeReader(rd, p))
+					if reqErr != nil {
+						return reqErr
+					}
+					req.Header.Set("Content-Type", "text/plain;name="+unicode(stream.GetName()))
+					req.Header.Set("contentSize", strconv.FormatInt(size, 10))
+					req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", start, start+byteSize-1))
+					req.Header.Set("uploadtaskID", resp.Data.UploadResult.UploadTaskID)
+					req.Header.Set("rangeType", "0")
+					req.ContentLength = byteSize
+
+					res, doErr := base.HttpClient.Do(req)
+					if doErr != nil {
+						return doErr
+					}
+					defer res.Body.Close()
+					bodyBytes, readErr := io.ReadAll(res.Body)
+					if readErr != nil {
+						return fmt.Errorf("error reading response body: %v", readErr)
+					}
+					if res.StatusCode != http.StatusOK {
+						return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(bodyBytes))
+					}
+					var result InterLayerUploadResult
+					xmlErr := xml.Unmarshal(bodyBytes, &result)
+					if xmlErr != nil {
+						return fmt.Errorf("error parsing XML: %v", xmlErr)
+					}
+					if result.ResultCode != 0 {
+						return fmt.Errorf("upload failed with result code: %d, message: %s", result.ResultCode, result.Msg)
+					}
+					return nil
+				},
+				retry.Context(ctx),
+				retry.Attempts(3),
+				retry.DelayType(retry.BackOffDelay),
+				retry.Delay(time.Second),
+			)
+			ss.FreeSectionReader(rd)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return errs.NotImplement
+	}
+}
+
+func (d *Yun139) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
+	switch d.Addition.Type {
+	case MetaPersonalNew:
+		var resp base.Json
+		var uri string
+		data := base.Json{
+			"category": "video",
+			"fileId":   args.Obj.GetID(),
+		}
+		switch args.Method {
+		case "video_preview":
+			uri = "/videoPreview/getPreviewInfo"
+		default:
+			return nil, errs.NotSupport
+		}
+		_, err := d.personalPost(uri, data, &resp)
+		if err != nil {
+			return nil, err
+		}
+		return resp["data"], nil
+	default:
+		return nil, errs.NotImplement
+	}
+}
+
+func (d *Yun139) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	if d.UserDomainID == "" {
+		return nil, errs.NotImplement
+	}
+	detail, err := d.getDiskQuotaDetail(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	total := detail.Data.DiskSize * utils.MB
+	used := (detail.Data.DiskSize - detail.Data.FreeDiskSize) * utils.MB
+
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
+}
+
+var _ driver.Driver = (*Yun139)(nil)
