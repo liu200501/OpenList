@@ -2036,7 +2036,7 @@ func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
 }
 
 // ============================================================
-// ★ 新增：视频时长获取与缓存
+// ★ 新增：视频时长获取与缓存（含持久化）
 // ============================================================
 
 var videoExts = map[string]bool{
@@ -2051,18 +2051,34 @@ func isVideoFile(name string) bool {
 	return videoExts[ext]
 }
 
+// durationCache 进程内一级缓存：fileID -> duration(秒)
 var durationCache sync.Map
 
+// fetchVideoDuration 调用 /videoPreview/getPreviewInfo 获取视频时长。
+// 优先读持久化缓存，未命中才请求 139，拿到后同时写入内存和持久化缓存。
 func (d *Yun139) fetchVideoDuration(fileID string) float64 {
 	if fileID == "" {
 		return 0
 	}
+
+	// 0) 首次调用加载持久化缓存
+	loadDurationCacheOnce()
+
+	// 1) 读持久化缓存
+	if v := getPersistDuration(fileID); v > 0 {
+		return v
+	}
+
+	// 2) 读进程内缓存
 	if v, ok := durationCache.Load(fileID); ok {
-		if f, ok := v.(float64); ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			// 顺便写入持久化缓存
+			setPersistDuration(fileID, f)
 			return f
 		}
 	}
 
+	// 3) 请求 139 接口
 	data := base.Json{
 		"category": "video",
 		"fileId":   fileID,
@@ -2081,6 +2097,8 @@ func (d *Yun139) fetchVideoDuration(fileID string) float64 {
 		return 0
 	}
 
+	// 4) 写两层缓存
 	durationCache.Store(fileID, dur)
+	setPersistDuration(fileID, dur)
 	return dur
 }

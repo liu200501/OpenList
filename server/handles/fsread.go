@@ -47,7 +47,7 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
-	// ★ 新增：视频时长（秒），非视频或未取到时为 0
+	// ★ 视频时长（秒），非视频或未取到时为 0
 	Duration float64 `json:"duration,omitempty"`
 }
 
@@ -231,7 +231,7 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 }
 
 // ============================================================
-// ★ 新增：视频时长进程内缓存 + 从 Link.Header 取时长
+// 视频时长进程内缓存 + 从 Link.Header 取时长
 // ============================================================
 
 // listDurationCache 缓存 path -> duration（秒），避免重复请求
@@ -271,6 +271,16 @@ func getVideoDuration(ctx context.Context, reqPath string) float64 {
 	return dur
 }
 
+// ★ getObjDuration 从 obj 上读时长
+// 139 驱动在 List() 里会把视频 obj 包一层 objWithDuration，
+// 附带 GetDuration() 方法，这里通过接口断言把它读出来。
+func getObjDuration(obj model.Obj) float64 {
+	if p, ok := obj.(interface{ GetDuration() float64 }); ok {
+		return p.GetDuration()
+	}
+	return 0
+}
+
 func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 	var resp []ObjResp
 	for _, obj := range objs {
@@ -288,9 +298,8 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
-			// ★ 列表接口不主动取时长，duration 保持 0
-			// 前端点击按钮后单独调 /api/fs/get 逐个填充
-			Duration: 0,
+			// ★ 从 obj 上读时长（139 驱动已填充，未命中时为 0）
+			Duration: getObjDuration(obj),
 		})
 	}
 	return resp
@@ -436,7 +445,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			Thumb:        thumb,
 			MountDetails: mountDetails,
-			Duration:     0,
+			Duration:     getObjDuration(obj),
 		},
 		RawURL:   rawURL,
 		Readme:   getReadme(meta, reqPath),

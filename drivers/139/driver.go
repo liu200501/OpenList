@@ -178,26 +178,51 @@ func (d *Yun139) Drop(ctx context.Context) error {
 }
 
 func (d *Yun139) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	var (
+		objs []model.Obj
+		err  error
+	)
 	switch d.Addition.Type {
 	case MetaPersonalNew:
-		return d.personalGetFiles(dir.GetID())
+		objs, err = d.personalGetFiles(dir.GetID())
 	case MetaPersonal:
-		return d.getFiles(dir.GetID())
+		objs, err = d.getFiles(dir.GetID())
 	case MetaFamily:
-		return d.familyGetFiles(dir.GetID())
+		objs, err = d.familyGetFiles(dir.GetID())
 	case MetaGroup:
-		return d.groupGetFiles(dir.GetID())
+		objs, err = d.groupGetFiles(dir.GetID())
 	case MetaShare:
 		if dir.GetID() == "root" {
-			return d.shareGetMergedFiles(d.shareRootEntries())
+			objs, err = d.shareGetMergedFiles(d.shareRootEntries())
+		} else if refs, ok := decodeShareRefs(dir.GetID()); ok {
+			objs, err = d.shareGetMergedFiles(refs)
+		} else {
+			objs, err = d.shareGetFilesWithRef(shareRef{LinkID: d.LinkID, NodeID: dir.GetID()}, dir.GetID())
 		}
-		if refs, ok := decodeShareRefs(dir.GetID()); ok {
-			return d.shareGetMergedFiles(refs)
-		}
-		return d.shareGetFilesWithRef(shareRef{LinkID: d.LinkID, NodeID: dir.GetID()}, dir.GetID())
 	default:
 		return nil, errs.NotImplement
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// ★ 用持久化缓存填时长（只读缓存，不请求 139）
+	if d.Addition.Type == MetaPersonalNew {
+		loadDurationCacheOnce()
+		for _, obj := range objs {
+			if obj.IsDir() {
+				continue
+			}
+			if !isVideoFile(obj.GetName()) {
+				continue
+			}
+			if dur := getPersistDuration(obj.GetID()); dur > 0 {
+				attachDuration(obj, dur)
+			}
+		}
+	}
+
+	return objs, nil
 }
 
 func (d *Yun139) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
