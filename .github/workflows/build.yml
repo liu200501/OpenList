@@ -50,9 +50,8 @@ jobs:
         uses: OpenListTeam/cgo-actions@v1.3.0
         with:
           targets: windows-amd64
-          # -trimpath / -buildvcs=false 是 go build 选项，放前面
-          # -s / -w 是链接器选项，放 -ldflags 里
-          flags: '-trimpath -buildvcs=false -ldflags=-s -w'
+          # 只加链接器优化，不加 -trimpath/-buildvcs，避免 xgo 解析出错
+          flags: '-ldflags=-s -w'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
@@ -64,7 +63,7 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
           output: openlist-windows-amd64$ext
 
-      # 关键优化：用 UPX 再压一遍，能再砍掉 50% 以上
+      # 用 UPX 再压一遍，能再砍掉 50% 以上
       - name: Compress with UPX
         run: |
           sudo apt-get update
