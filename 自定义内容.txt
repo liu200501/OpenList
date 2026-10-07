@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenList 前端增强</title>
+
+  <!--
+  ============================================================================
+  OpenList 前端增强脚本 - 功能总览
+  ============================================================================
+
+  一、样式增强（<style> 部分）
+
+    1. 主页容器最大宽度
+    2. 网格图片铺满
+    3. 隐藏滚动条
+    4. ArtPlayer 控制栏增强（.art-controls + .art-progress 一起显隐）
+    5. 弹幕/字幕字号
+    6. 字号提示浮层
+    7. 时长列
+    8. 工具栏
+
+  二、脚本功能（<script> 部分）
+
+    1. 类型列
+    2. 类型排序
+    3. 网格视图隐藏字幕文件
+    4. 总大小统计
+    5. 本文件夹视频时长统计
+    6. 递归统计所有子文件夹视频时长
+    7. 导出 CSV
+    8. ArtPlayer 控制栏悬停（桌面端）
+    9. 滚轮快进/后退（桌面端）
+   10. Android 触摸手势
+   11. 触发 ArtPlayer 原生全屏
+   12. 弹幕层守卫
+   13. 弹幕/字幕字号调节
+   14. 主入口与 MutationObserver
+
+  ============================================================================
+  -->
+
+  <style>
+    /* ===== 主页容器最大宽度 ===== */
+    .hope-c-PJLV-iicyfOA-css,
+    .hope-c-PJLV-icQbEuA-css,
+    .hope-c-PJLV-iigjoxS-css,
+    .obj-box {
+      max-width: 1200px !important;
+      width: min(99%, 1200px) !important;
+      margin-left: auto !important;
+      margin-right: auto !important;
+    }
+
+    /* ===== 网格图片铺满 ===== */
+    .grid-item img,
+    .grid-item .hope-image {
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: contain !important;
+    }
+
+    /* ===== 隐藏滚动条 ===== */
+    ::-webkit-scrollbar {
+      display: none;
+    }
+    * {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    /* ============================================================
+     *  ArtPlayer 控制栏增强
+     *
+     *  结构：
+     *    .art-bottom        全屏层（和播放器等大）→ 永远穿透
+     *      ├─ .art-progress   进度条（只占底部一条）→ 只改 opacity
+     *      └─ .art-controls   按钮条（只占底部一条）→ 改 opacity + pe
+     *
+     *  规则：
+     *    - .art-bottom   pointer-events: none （始终）
+     *    - .art-controls 默认隐藏不可点，悬停时出现可点
+     *    - .art-progress 默认隐藏，悬停时出现（不碰 pe，保证可拖）
+     * ============================================================ */
+
+    /* .art-bottom 保持穿透，永不拦截鼠标 */
+    .art-video-player .art-bottom {
+      pointer-events: none !important;
+    }
+
+    /* 控制条（按钮）：默认隐藏且不可点 */
+    .art-video-player .art-bottom .art-controls {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      transition: opacity 0.2s ease !important;
+    }
+
+    /* 进度条：默认透明，但保持可拖（不加 pointer-events: none） */
+    .art-video-player .art-bottom .art-progress {
+      opacity: 0 !important;
+      transition: opacity 0.2s ease !important;
+    }
+
+    /* 悬停底部时，两者都出现 */
+    .art-video-player.ol-bottom-hover .art-bottom .art-controls,
+    .art-video-player.ol-bottom-hover .art-bottom .art-progress {
+      opacity: 1 !important;
+    }
+
+    /* 悬停时按钮条才可点 */
+    .art-video-player.ol-bottom-hover .art-bottom .art-controls {
+      pointer-events: auto !important;
+    }
+
+    /* 滚轮快进时仅视觉提示，不拦截鼠标 */
+    .art-video-player.ol-wheel-flash .art-bottom .art-controls,
+    .art-video-player.ol-wheel-flash .art-bottom .art-progress {
+      opacity: 1 !important;
+      /* 注意：不要写 pointer-events: auto */
+    }
+
+    /* 弹幕层只保留点击穿透 */
+    .art-video-player .art-danmuku {
+      pointer-events: none !important;
+    }
+
+    /* Android：暂停时常显控制条，播放时自动隐藏 */
+    .art-video-player.ol-android-paused .art-bottom .art-controls,
+    .art-video-player.ol-android-paused .art-bottom .art-progress,
+    .art-video-player.ol-android-paused .art-top {
+      opacity: 1 !important;
+      pointer-events: auto !important;
+    }
+    .art-video-player.ol-android-playing .art-bottom .art-controls,
+    .art-video-player.ol-android-playing .art-bottom .art-progress,
+    .art-video-player.ol-android-playing .art-top {
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+
+    /* ===== 弹幕/字幕字号 ===== */
+    .art-video-player {
+      --ol-danmuku-font-size: 25px;
+      --ol-subtitle-font-size: 20px;
+    }
+    .art-video-player .art-danmuku > div {
+      font-size: var(--ol-danmuku-font-size) !important;
+    }
+    .art-video-player .art-subtitle {
+      font-size: var(--ol-subtitle-font-size) !important;
+    }
+
+    /* ===== 字号提示浮层 ===== */
+    .ol-font-toast {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 99999;
+      padding: 10px 16px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
+      font-size: 16px;
+      font-family: system-ui, sans-serif;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .ol-font-toast.ol-show {
+      opacity: 1;
+    }
+
+    /* ===== 时长列 ===== */
+    .ol-duration-hint {
+      font-size: 12px;
+      opacity: 0.9;
+      margin-left: 4px;
+      color: #2ecc71;
+      font-weight: 500;
+    }
+    p.ol-duration-col {
+      flex-shrink: 0;
+      width: 80px;
+      text-align: center;
+      color: #2ecc71;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      opacity: 0.9;
+    }
+
+    /* ===== 工具栏 ===== */
+    .ol-toolbar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 12px;
+      margin: 8px 0;
+      font-size: 13px;
+      color: #888;
+      border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+    }
+    .ol-toolbar button {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: transparent;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+    .ol-toolbar button:hover {
+      opacity: 0.7;
+    }
+  </style>
+
+  <script>
+    (function () {
+      'use strict';
+
+      /* ============================================================
+       *  常量
+       * ============================================================ */
+
+      const EXT_COLOR_MAP = {
+        mp4: '#3498db', mkv: '#3498db', avi: '#3498db', flv: '#3498db',
+        mov: '#3498db', ts: '#e67e22',
+        xml: '#e74c3c', ass: '#e74c3c', srt: '#e74c3c',
+        zip: '#9b59b6', rar: '#9b59b6', '7z': '#9b59b6', tar: '#9b59b6',
+        gz: '#9b59b6', iso: '#9b59b6',
+        jpg: '#2ecc71', jpeg: '#2ecc71', png: '#2ecc71', gif: '#2ecc71', webp: '#2ecc71',
+        mp3: '#f1c40f', flac: '#f1c40f', wav: '#f1c40f',
+        pdf: '#e74c3c',
+        txt: '#95a5a6', md: '#95a5a6', json: '#95a5a6', log: '#95a5a6',
+      };
+
+      const DEFAULT_COLOR = '#7f8c8d';
+      const TYPE_COLUMN_WIDTH = 90;
+      const DURATION_COLUMN_WIDTH = 80;
+      const GRID_HIDDEN_EXTS = ['xml', 'ass', 'srt'];
+      const BOTTOM_HOVER_ZONE = 90;
+      const BOTTOM_HIDE_DELAY = 1200;
+      const WHEEL_SEEK_SECONDS = 5;
+      const LONG_PRESS_MS = 600;
+      const SWIPE_MIN_DISTANCE = 14;
+      const SWIPE_MIN_FULL_WIDTH_SECONDS = 60;
+      const SWIPE_MAX_FULL_WIDTH_SECONDS = 600;
+      const SWIPE_DURATION_RATIO = 0.2;
+      const DANMUKU_FONT_MIN = 12;
+      const DANMUKU_FONT_MAX = 60;
+      const DANMUKU_FONT_STEP = 2;
+      const SUBTITLE_FONT_MIN = 10;
+      const SUBTITLE_FONT_MAX = 60;
+      const SUBTITLE_FONT_STEP = 2;
+      const STORAGE_KEY_DANMUKU = 'ol_danmuku_font_size';
+      const STORAGE_KEY_SUBTITLE = 'ol_subtitle_font_size';
+      const VIDEO_EXTS = [
+        'mp4', 'mkv', 'avi', 'flv', 'mov', 'ts',
+        'webm', 'm4v', 'mpg', 'mpeg', 'rmvb', '3gp',
+      ];
+      const SIDEBAR_ID = 'custom-video-sidebar';
+      const SIDEBAR_API = '/api/fs/list';
+      const STORAGE_KEY_SIDEBAR = 'ol_sidebar_visible';
+
+      /* ============================================================
+       *  状态
+       * ============================================================ */
+
+      let lastRecursiveScanResults = [];
+      const IS_ANDROID = /Android/i.test(navigator.userAgent);
+      let sidebarCurrentPath = '';
+      let sidebarVideos = [];
+
+      /* ============================================================
+       *  工具函数
+       * ============================================================ */
+
+      function getExt(name) {
+        const parts = name.split('.');
+        if (parts.length < 2) return '';
+        return parts.pop().toLowerCase();
+      }
+
+      function isVideoFile(name) {
+        return VIDEO_EXTS.includes(getExt(name));
+      }
+
+      function getTypeInfo(name) {
+        const ext = getExt(name);
+        if (!ext) return null;
+        return {
+          label: ext.toUpperCase(),
+          color: EXT_COLOR_MAP[ext] || DEFAULT_COLOR,
+        };
+      }
+
+      function getRowWrapper(row) {
+        return row.closest('div[style*="width"]') || row;
+      }
+
+      function isGridView() {
+        return !!document.querySelector('.grid-item');
+      }
+
+      function safeDecode(s) {
+        try {
+          return decodeURIComponent(s);
+        } catch (e) {
+          return s;
+        }
+      }
+
+      function normalizePath(p) {
+        let decoded = safeDecode(p || '');
+        if (!decoded.startsWith('/')) decoded = '/' + decoded;
+        if (!decoded.endsWith('/')) decoded += '/';
+        return decoded;
+      }
+
+      function parseSize(str) {
+        if (!str || str === '-') return 0;
+        const m = str.trim().match(/^([\d.]+)\s*([KMGTP]?)(i?B)?$/i);
+        if (!m) return 0;
+        const value = parseFloat(m[1]);
+        const unit = (m[2] || '').toUpperCase();
+        const base = 1024;
+        const map = {
+          '': 1,
+          K: base,
+          M: base ** 2,
+          G: base ** 3,
+          T: base ** 4,
+          P: base ** 5,
+        };
+        return value * (map[unit] || 1);
+      }
+
+      function formatSize(bytes) {
+        if (bytes === 0) return '0 B';
+        const units = ['B', 'K', 'M', 'G', 'T', 'P'];
+        let i = 0;
+        let v = bytes;
+        while (v >= 1024 && i < units.length - 1) {
+          v /= 1024;
+          i++;
+        }
+        return (i === 0 ? v : v.toFixed(2)) + units[i];
+      }
+
+      function formatDuration(seconds) {
+        if (!seconds || seconds <= 0) return '0:00';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        if (h > 0) {
+          return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+        return `${m}:${String(s).padStart(2, '0')}`;
+      }
+
+      /* ============================================================
+       *  工具栏
+       * ============================================================ */
+
+      function ensureToolbar() {
+        const listEl = document.querySelector('.list');
+        if (!listEl) return null;
+        const parent = listEl.parentElement;
+        if (!parent) return null;
+        let toolbar = parent.querySelector(':scope > .ol-toolbar');
+        if (toolbar) return toolbar;
+        toolbar = document.createElement('div');
+        toolbar.className = 'ol-toolbar';
+        parent.insertBefore(toolbar, listEl);
+        return toolbar;
+      }
+
+      /* ============================================================
+       *  列表处理：类型列 + 时长列
+       * ============================================================ */
+
+      function processListRows() {
+        if (isGridView()) return;
+        document.querySelectorAll('a.list-item').forEach((row) => {
+          if (row.dataset.typeProcessed && row.querySelector('p.type')) return;
+          const nameEl = row.querySelector('p.name');
+          const sizeEl = row.querySelector('p.size');
+          if (!nameEl || !sizeEl) return;
+
+          if (sizeEl.textContent.trim() === '-') {
+            if (!row.querySelector('p.ol-duration-col')) {
+              const durEl = document.createElement('p');
+              durEl.className = 'ol-duration-col';
+              durEl.textContent = '';
+              sizeEl.before(durEl);
+            }
+            row.dataset.typeProcessed = 'true';
+            return;
+          }
+
+          const info = getTypeInfo(nameEl.textContent.trim());
+          if (!info) {
+            row.dataset.typeProcessed = 'true';
+            return;
+          }
+
+          const existing = row.querySelector('p.type');
+          if (existing) existing.remove();
+
+          const typeEl = document.createElement('p');
+          typeEl.className = 'type hope-text';
+          typeEl.textContent = info.label;
+          typeEl.style.cssText = `
+            flex-shrink: 0;
+            width: ${TYPE_COLUMN_WIDTH}px;
+            text-align: center;
+            color: ${info.color};
+            font-size: 16px;
+            font-weight: 500;
+          `;
+          sizeEl.before(typeEl);
+
+          if (!row.querySelector('p.ol-duration-col')) {
+            const name = nameEl.textContent.trim();
+            const durEl = document.createElement('p');
+            durEl.className = 'ol-duration-col';
+            durEl.dataset.fileName = name;
+            durEl.textContent = isVideoFile(name) ? '--:--' : '';
+            sizeEl.before(durEl);
+          }
+
+          row.dataset.typeProcessed = 'true';
+        });
+      }
+
+      /* ============================================================
+       *  类型排序
+       * ============================================================ */
+
+      let sortDirection = 0;
+
+      function addTypeHeader() {
+        if (isGridView()) return;
+        const titleRow = document.querySelector('.title');
+        if (!titleRow || titleRow.dataset.typeHeaderAdded) return;
+
+        const sizeHeader =
+          titleRow.querySelector('p.size') || titleRow.querySelectorAll('p')[1];
+        if (!sizeHeader) return;
+
+        const typeHeader = document.createElement('p');
+        typeHeader.className = 'hope-text';
+        typeHeader.textContent = '类型';
+        typeHeader.style.cssText = `
+          flex-shrink: 0;
+          width: ${TYPE_COLUMN_WIDTH}px;
+          text-align: center;
+          cursor: pointer;
+          user-select: none;
+          opacity: 0.85;
+        `;
+        typeHeader.title = '点击按类型排序';
+        sizeHeader.before(typeHeader);
+
+        const durHeader = document.createElement('p');
+        durHeader.className = 'hope-text';
+        durHeader.textContent = '时长';
+        durHeader.style.cssText = `
+          flex-shrink: 0;
+          width: ${DURATION_COLUMN_WIDTH}px;
+          text-align: center;
+          opacity: 0.85;
+        `;
+        durHeader.title = '视频时长（点击顶部按钮计算）';
+        sizeHeader.before(durHeader);
+
+        typeHeader.addEventListener('click', () => {
+          sortDirection = sortDirection === 1 ? -1 : 1;
+          sortByType();
+          typeHeader.textContent = sortDirection === 1 ? '类型 ↑' : '类型 ↓';
+        });
+
+        titleRow.dataset.typeHeaderAdded = 'true';
+      }
+
+      function sortByType() {
+        const listContainer = document.querySelector('.list');
+        if (!listContainer) return;
+        const rows = Array.from(listContainer.querySelectorAll('a.list-item'));
+        if (!rows.length) return;
+
+        rows.sort((a, b) => {
+          const aS = a.querySelector('p.size')?.textContent.trim() || '';
+          const bS = b.querySelector('p.size')?.textContent.trim() || '';
+          const aD = aS === '-';
+          const bD = bS === '-';
+          if (aD !== bD) return aD ? -1 : 1;
+          const aT = a.querySelector('p.type')?.textContent.trim() || '';
+          const bT = b.querySelector('p.type')?.textContent.trim() || '';
+          return aT.localeCompare(bT, 'zh-CN');
+        });
+
+        if (sortDirection === -1) rows.reverse();
+        rows.forEach((row) => listContainer.appendChild(getRowWrapper(row)));
+      }
+
+      /* ============================================================
+       *  网格隐藏字幕文件
+       * ============================================================ */
+
+      function hideSubtitlesInGrid() {
+        if (!isGridView()) return;
+        document.querySelectorAll('a.grid-item').forEach((item) => {
+          if (item.dataset.subtitleHidden) return;
+          const nameEl = item.querySelector('p[title]');
+          let name = '';
+          if (nameEl) {
+            name = nameEl.getAttribute('title') || nameEl.textContent.trim();
+          }
+          if (!name) return;
+          if (GRID_HIDDEN_EXTS.includes(getExt(name))) {
+            item.style.display = 'none';
+            item.dataset.subtitleHidden = 'true';
+          }
+        });
+      }
+
+      /* ============================================================
+       *  获取视频时长
+       * ============================================================ */
+
+      function buildFullPath(name) {
+        let p = decodeURIComponent(location.pathname);
+        if (!p.endsWith('/')) p += '/';
+        return (p + name).replace(/\/{2,}/g, '/');
+      }
+
+      async function fetchVideoDuration(name) {
+        try {
+          const fullPath = buildFullPath(name);
+          const token =
+            localStorage.getItem('token') ||
+            localStorage.getItem('openlist_token') ||
+            localStorage.getItem('ol_token') ||
+            '';
+          const headers = { 'Content-Type': 'application/json' };
+          if (token) headers['Authorization'] = token;
+
+          const resp = await fetch('/api/fs/get', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ path: fullPath }),
+          });
+          if (!resp.ok) return 0;
+
+          const json = await resp.json();
+          const data = json && json.data;
+          if (!data) return 0;
+
+          const headerText = data.header || '';
+          if (headerText) {
+            const m = headerText.match(/X-Video-Duration\s*:\s*([\d.]+)/i);
+            if (m) {
+              const n = parseFloat(m[1]);
+              if (isFinite(n) && n > 0) return n;
+            }
+          }
+
+          const cands = [
+            data.video_duration,
+            data.duration,
+            data.metadata && data.metadata.video_duration,
+            data.metadata && data.metadata.duration,
+          ];
+          for (const c of cands) {
+            const n = typeof c === 'string' ? parseFloat(c) : c;
+            if (typeof n === 'number' && isFinite(n) && n > 0) return n;
+          }
+          return 0;
+        } catch (e) {
+          return 0;
+        }
+      }
+
+      /* ============================================================
+       *  总大小 + 时长统计 + 导出 CSV
+       * ============================================================ */
+
+      async function updateTotalSize() {
+        const toolbar = ensureToolbar();
+        if (!toolbar) return;
+        const cur = location.pathname;
+        if (toolbar.dataset.sizePath === cur) return;
+        toolbar.dataset.sizePath = cur;
+        toolbar.innerHTML = '';
+
+        const rows = document.querySelectorAll('a.list-item');
+        if (!rows.length) {
+          delete toolbar.dataset.sizePath;
+          return;
+        }
+
+        let totalSize = 0;
+        const videoNames = [];
+
+        rows.forEach((row) => {
+          const sizeEl = row.querySelector('p.size');
+          const nameEl = row.querySelector('p.name');
+          if (!sizeEl || !nameEl) return;
+
+          const sizeText = sizeEl.textContent.trim();
+          if (sizeText === '-') return;
+          totalSize += parseSize(sizeText);
+
+          const name = nameEl.textContent.trim();
+          if (isVideoFile(name)) videoNames.push(name);
+        });
+
+        const sizeSpan = document.createElement('span');
+        sizeSpan.textContent = `总大小 ${formatSize(totalSize)}`;
+        sizeSpan.style.marginRight = '8px';
+        toolbar.appendChild(sizeSpan);
+
+        const hasVideos = videoNames.length > 0;
+
+        if (hasVideos) {
+          const btn = document.createElement('button');
+          btn.style.cssText = 'border: 1px solid #2ecc71; color: #2ecc71;';
+          btn.textContent = `统计本文件夹视频时长 (${videoNames.length})`;
+          btn.title = '只统计当前文件夹，不递归子文件夹';
+
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            let total = 0;
+            let done = 0;
+            let success = 0;
+
+            for (const name of videoNames) {
+              const dur = await fetchVideoDuration(name);
+              const row = Array.from(document.querySelectorAll('a.list-item')).find(
+                (r) => r.querySelector('p.name')?.textContent.trim() === name
+              );
+              const durEl = row ? row.querySelector('p.ol-duration-col') : null;
+
+              if (dur > 0) {
+                total += dur;
+                success++;
+                if (durEl) durEl.textContent = formatDuration(dur);
+              } else {
+                if (durEl) durEl.textContent = 'N/A';
+              }
+
+              done++;
+              btn.textContent = `统计中… (${done}/${videoNames.length})`;
+            }
+
+            if (total > 0) {
+              btn.textContent = `本文件夹视频总时长 ${formatDuration(total)} (${success}/${videoNames.length})`;
+              btn.style.borderColor = 'transparent';
+            } else {
+              btn.textContent = `未获取到时长 (0/${videoNames.length})`;
+            }
+          });
+
+          toolbar.appendChild(btn);
+        }
+
+        const recurBtn = document.createElement('button');
+        recurBtn.style.cssText = 'border: 1px solid #3498db; color: #3498db;';
+        recurBtn.textContent = '递归统计所有子文件夹视频时长';
+        recurBtn.title = '遍历当前目录及其所有子文件夹，统计所有视频总时长';
+
+        let recurStopFlag = false;
+
+        recurBtn.addEventListener('click', async () => {
+          if (recurBtn.dataset.running === '1') {
+            recurStopFlag = true;
+            recurBtn.textContent = '正在停止…';
+            return;
+          }
+
+          recurBtn.dataset.running = '1';
+          recurStopFlag = false;
+          lastRecursiveScanResults = [];
+          recurBtn.style.borderColor = '#f39c12';
+          recurBtn.style.color = '#f39c12';
+
+          let totalDuration = 0;
+          let totalVideos = 0;
+          let doneVideos = 0;
+          let successVideos = 0;
+          let dirCount = 0;
+
+          async function walk(dirPath) {
+            if (recurStopFlag) return;
+            if (!dirPath.endsWith('/')) dirPath += '/';
+
+            let listResp;
+            try {
+              const resp = await fetch('/api/fs/list', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  path: dirPath,
+                  page: 1,
+                  per_page: 0,
+                  refresh: false,
+                }),
+              });
+              if (!resp.ok) return;
+              listResp = await resp.json();
+            } catch (e) {
+              return;
+            }
+
+            const content = (listResp && listResp.data && listResp.data.content) || [];
+            dirCount++;
+
+            const localVideos = [];
+            const subDirs = [];
+
+            for (const item of content) {
+              const childName = safeDecode(item.name);
+              const dirPrefix = dirPath.endsWith('/') ? dirPath : dirPath + '/';
+
+              if (item.is_dir) {
+                subDirs.push(dirPrefix + childName + '/');
+              } else if (isVideoFile(childName)) {
+                localVideos.push({
+                  path: dirPrefix + childName,
+                  name: childName,
+                  size: item.size || 0,
+                  duration: item.duration || 0,
+                });
+              }
+            }
+
+            totalVideos += localVideos.length;
+
+            for (const v of localVideos) {
+              if (recurStopFlag) return;
+
+              let dur = v.duration;
+              if (!(dur > 0)) {
+                try {
+                  const resp = await fetch('/api/fs/get', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: v.path }),
+                  });
+                  if (resp.ok) {
+                    const j = await resp.json();
+                    const d = j && j.data;
+                    const headerText = (d && d.header) || '';
+                    if (headerText) {
+                      const m = headerText.match(/X-Video-Duration\s*:\s*([\d.]+)/i);
+                      if (m) dur = parseFloat(m[1]);
+                    }
+                    if (!(dur > 0) && d && d.duration) dur = d.duration;
+                  }
+                } catch (e) {
+                  /* 忽略 */
+                }
+              }
+
+              if (dur > 0) {
+                totalDuration += dur;
+                successVideos++;
+              }
+              doneVideos++;
+
+              lastRecursiveScanResults.push({
+                path: v.path,
+                name: v.name,
+                size: v.size || 0,
+                duration: dur > 0 ? dur : 0,
+              });
+
+              if (doneVideos % 5 === 0 || doneVideos === totalVideos) {
+                recurBtn.textContent = `递归统计中… 已扫描 ${dirCount} 个文件夹 / ${doneVideos}/${totalVideos} 个视频`;
+              }
+            }
+
+            for (const sub of subDirs) {
+              if (recurStopFlag) return;
+              await walk(sub);
+            }
+          }
+
+          const startPath = normalizePath(location.pathname);
+          await walk(startPath);
+
+          if (recurStopFlag) {
+            recurBtn.textContent = `已停止：${doneVideos}/${totalVideos} 个视频，累计 ${formatDuration(totalDuration)}`;
+          } else if (totalDuration > 0) {
+            recurBtn.textContent = `递归总时长 ${formatDuration(totalDuration)} (${successVideos}/${totalVideos} 视频，${dirCount} 个文件夹)`;
+            recurBtn.title = `成功获取 ${successVideos} 个视频时长，共扫描 ${dirCount} 个文件夹`;
+          } else {
+            recurBtn.textContent = `未获取到时长 (${totalVideos} 个视频)`;
+          }
+
+          recurBtn.dataset.running = '0';
+          recurBtn.style.borderColor = '#3498db';
+          recurBtn.style.color = '#3498db';
+        });
+
+        toolbar.appendChild(recurBtn);
+
+        const exportBtn = document.createElement('button');
+        exportBtn.style.cssText = 'border: 1px solid #9b59b6; color: #9b59b6;';
+        exportBtn.textContent = '导出时长表格 (CSV)';
+        exportBtn.title = '把最近一次"递归统计"的结果导出为 CSV';
+
+        exportBtn.addEventListener('click', () => {
+          if (!lastRecursiveScanResults.length) {
+            alert('还没有递归统计结果。请先点击"递归统计所有子文件夹视频时长"，扫描完成后再导出。');
+            return;
+          }
+
+          const esc = (v) => {
+            const s = String(v == null ? '' : v);
+            if (/[",\r\n]/.test(s)) {
+              return '"' + s.replace(/"/g, '""') + '"';
+            }
+            return s;
+          };
+
+          const header = [
+            '路径',
+            '文件名',
+            '大小(字节)',
+            '大小(可读)',
+            '时长(秒)',
+            '时长(H:MM:SS)',
+          ];
+          const lines = [header.map(esc).join(',')];
+
+          let totalSize2 = 0;
+          let totalDur = 0;
+
+          for (const r of lastRecursiveScanResults) {
+            totalSize2 += r.size || 0;
+            totalDur += r.duration || 0;
+            lines.push(
+              [
+                r.path,
+                r.name,
+                r.size || 0,
+                formatSize(r.size || 0),
+                (r.duration || 0).toFixed(3),
+                r.duration > 0 ? formatDuration(r.duration) : 'N/A',
+              ]
+                .map(esc)
+                .join(',')
+            );
+          }
+
+          lines.push('');
+          lines.push(
+            [
+              '合计',
+              `${lastRecursiveScanResults.length} 个视频`,
+              totalSize2,
+              formatSize(totalSize2),
+              totalDur.toFixed(3),
+              formatDuration(totalDur),
+            ]
+              .map(esc)
+              .join(',')
+          );
+
+          const csv = '\uFEFF' + lines.join('\r\n');
+          const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+
+          const pathParts = normalizePath(location.pathname).split('/').filter(Boolean);
+          const dirName = pathParts.length ? pathParts[pathParts.length - 1] : 'root';
+          const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const filename = `video-durations_${dirName}_${ts}.csv`;
+
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        });
+
+        toolbar.appendChild(exportBtn);
+      }
+
+      /* ============================================================
+       *  ArtPlayer 控制栏悬停（桌面端）
+       *
+       *  ol-bottom-hover 类加在 player 上；
+       *  CSS 中控制 .art-controls（可点）和 .art-progress（可拖）一起显隐。
+       * ============================================================ */
+
+      function setupBottomHover() {
+        if (IS_ANDROID) return;
+
+        document.querySelectorAll('.art-video-player').forEach((player) => {
+          if (player.dataset.olBottomHoverBound) return;
+          player.dataset.olBottomHoverBound = 'true';
+
+          let hideTimer = null;
+
+          const show = () => {
+            if (hideTimer) {
+              clearTimeout(hideTimer);
+              hideTimer = null;
+            }
+            player.classList.add('ol-bottom-hover');
+          };
+
+          const scheduleHide = () => {
+            if (hideTimer) return;
+            hideTimer = setTimeout(() => {
+              player.classList.remove('ol-bottom-hover');
+              hideTimer = null;
+            }, BOTTOM_HIDE_DELAY);
+          };
+
+          const hideNow = () => {
+            if (hideTimer) {
+              clearTimeout(hideTimer);
+              hideTimer = null;
+            }
+            player.classList.remove('ol-bottom-hover');
+          };
+
+          const handleMove = (x, y) => {
+            const r = player.getBoundingClientRect();
+            if (!r.width || !r.height) return;
+
+            const inBounds =
+              x >= r.left && x <= r.right &&
+              y >= r.top && y <= r.bottom;
+
+            if (!inBounds) {
+              hideNow();
+              return;
+            }
+
+            const fromBottom = r.bottom - y;
+            if (fromBottom <= BOTTOM_HOVER_ZONE) {
+              show();
+            } else {
+              scheduleHide();
+            }
+          };
+
+          document.addEventListener(
+            'pointermove',
+            (e) => handleMove(e.clientX, e.clientY),
+            { capture: true, passive: true }
+          );
+
+          document.addEventListener('mouseleave', hideNow);
+          window.addEventListener('blur', hideNow);
+          player.addEventListener('mouseleave', hideNow);
+        });
+      }
+
+      /* ============================================================
+       *  滚轮快进/后退（桌面端）
+       * ============================================================ */
+
+      function setupWheelSeek() {
+        if (IS_ANDROID) return;
+        document.querySelectorAll('.art-video-player').forEach((player) => {
+          if (player.dataset.olWheelSeekBound) return;
+          player.dataset.olWheelSeekBound = 'true';
+
+          player.addEventListener(
+            'wheel',
+            (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+
+              const video = player.querySelector('video');
+              if (!video) return;
+
+              const d = video.duration;
+              if (!d || !isFinite(d)) return;
+
+              let nt = video.currentTime + (e.deltaY < 0 ? -1 : 1) * WHEEL_SEEK_SECONDS;
+              nt = Math.max(0, Math.min(d, nt));
+              video.currentTime = nt;
+
+              player.classList.add('ol-wheel-flash');
+              clearTimeout(player._olSeekTimer);
+              player._olSeekTimer = setTimeout(() => {
+                player.classList.remove('ol-wheel-flash');
+              }, BOTTOM_HIDE_DELAY);
+            },
+            { passive: false }
+          );
+        });
+      }
+
+      /* ============================================================
+       *  Android 触摸手势：滑动快进 + 长按全屏
+       * ============================================================ */
+
+      function setupTouchGestures() {
+        if (!IS_ANDROID) return;
+
+        document.querySelectorAll('.art-video-player').forEach((player) => {
+          if (player.dataset.olTouchBound) return;
+          player.dataset.olTouchBound = 'true';
+
+          const video = player.querySelector('video');
+          if (!video) return;
+
+          const sync = () => {
+            player.classList.toggle('ol-android-paused', video.paused);
+            player.classList.toggle('ol-android-playing', !video.paused);
+          };
+          video.addEventListener('play', sync);
+          video.addEventListener('pause', sync);
+          video.addEventListener('ended', sync);
+          sync();
+
+          let hint = player.querySelector('.ol-swipe-hint');
+          if (!hint) {
+            hint = document.createElement('div');
+            hint.className = 'ol-swipe-hint';
+            hint.style.cssText = [
+              'position:absolute',
+              'left:50%',
+              'top:50%',
+              'transform:translate(-50%,-50%)',
+              'padding:8px 16px',
+              'background:rgba(0,0,0,0.75)',
+              'color:#fff',
+              'border-radius:6px',
+              'font-size:16px',
+              'font-family:system-ui,sans-serif',
+              'pointer-events:none',
+              'z-index:9999',
+              'display:none',
+              'white-space:nowrap',
+            ].join(';');
+            player.appendChild(hint);
+          }
+
+          let startX = 0;
+          let startY = 0;
+          let baseTime = 0;
+          let baseDuration = 0;
+          let swiping = false;
+          let longPressed = false;
+          let longTimer = null;
+
+          const onControl = (target) => {
+            if (!target || typeof target.closest !== 'function') return false;
+            return !!target.closest('.art-control, button, input, select, textarea');
+          };
+
+          const cancelLong = () => {
+            if (longTimer) {
+              clearTimeout(longTimer);
+              longTimer = null;
+            }
+          };
+
+          player.addEventListener(
+            'touchstart',
+            (e) => {
+              if (onControl(e.target)) {
+                swiping = false;
+                longPressed = false;
+                cancelLong();
+                return;
+              }
+
+              const t = e.touches[0];
+              if (!t) return;
+
+              startX = t.clientX;
+              startY = t.clientY;
+              baseTime = video.currentTime;
+              baseDuration = video.duration || 0;
+              swiping = false;
+              longPressed = false;
+              cancelLong();
+
+              longTimer = setTimeout(() => {
+                if (!swiping) {
+                  longPressed = true;
+                  triggerArtFullscreen(player);
+                }
+              }, LONG_PRESS_MS);
+            },
+            { passive: true }
+          );
+
+          player.addEventListener(
+            'touchmove',
+            (e) => {
+              if (longPressed) return;
+              const t = e.touches[0];
+              if (!t) return;
+
+              const dx = t.clientX - startX;
+              const dy = t.clientY - startY;
+              const adx = Math.abs(dx);
+              const ady = Math.abs(dy);
+
+              if (!swiping) {
+                if (ady > SWIPE_MIN_DISTANCE && ady > adx) {
+                  cancelLong();
+                  return;
+                }
+                if (adx > SWIPE_MIN_DISTANCE && adx > ady) {
+                  cancelLong();
+                  swiping = true;
+                }
+              }
+
+              if (swiping && baseDuration > 0) {
+                const r = player.getBoundingClientRect();
+                const w = r.width || 1;
+                const perFull = Math.max(
+                  SWIPE_MIN_FULL_WIDTH_SECONDS,
+                  Math.min(
+                    SWIPE_MAX_FULL_WIDTH_SECONDS,
+                    baseDuration * SWIPE_DURATION_RATIO
+                  )
+                );
+                const delta = (dx / w) * perFull;
+                const nt = Math.max(0, Math.min(baseDuration, baseTime + delta));
+                const diff = nt - baseTime;
+                hint.textContent =
+                  formatDuration(nt) +
+                  ' (' +
+                  (diff >= 0 ? '+' : '-') +
+                  formatDuration(Math.abs(diff)) +
+                  ')';
+                hint.style.display = 'block';
+              }
+            },
+            { passive: true }
+          );
+
+          player.addEventListener(
+            'touchend',
+            (e) => {
+              cancelLong();
+              hint.style.display = 'none';
+
+              if (swiping && baseDuration > 0) {
+                const t = e.changedTouches && e.changedTouches[0];
+                if (t) {
+                  const dx = t.clientX - startX;
+                  const r = player.getBoundingClientRect();
+                  const w = r.width || 1;
+                  const perFull = Math.max(
+                    SWIPE_MIN_FULL_WIDTH_SECONDS,
+                    Math.min(
+                      SWIPE_MAX_FULL_WIDTH_SECONDS,
+                      baseDuration * SWIPE_DURATION_RATIO
+                    )
+                  );
+                  const delta = (dx / w) * perFull;
+                  const nt = Math.max(0, Math.min(baseDuration, baseTime + delta));
+                  try {
+                    video.currentTime = nt;
+                  } catch (err) {
+                    /* 忽略 */
+                  }
+                }
+              }
+            },
+            { passive: true }
+          );
+
+          player.addEventListener(
+            'touchcancel',
+            () => {
+              cancelLong();
+              hint.style.display = 'none';
+              swiping = false;
+              longPressed = false;
+            },
+            { passive: true }
+          );
+        });
+      }
+
+      /* ============================================================
+       *  触发 ArtPlayer 原生全屏
+       * ============================================================ */
+
+      function triggerArtFullscreen(player) {
+        const btn = player.querySelector('.art-control-fullscreen');
+        if (btn) {
+          dispatchPointer(btn);
+          return;
+        }
+
+        const btnWeb = player.querySelector('.art-control-fullscreenWeb');
+        if (btnWeb) {
+          dispatchPointer(btnWeb);
+          return;
+        }
+
+        player.classList.toggle('art-fullscreen-web');
+      }
+
+      function dispatchPointer(btn) {
+        const opts = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          button: 0,
+          buttons: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+        };
+
+        try {
+          btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+          btn.dispatchEvent(
+            new PointerEvent('pointerup', { ...opts, buttons: 0 })
+          );
+        } catch (e) {
+          btn.dispatchEvent(new MouseEvent('mousedown', opts));
+          btn.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+        }
+      }
+
+      /* ============================================================
+       *  弹幕层守卫（空实现）
+       * ============================================================ */
+
+      function guardDanmukuLayer() {
+        /* 空实现 */
+      }
+
+      /* ============================================================
+       *  弹幕/字幕字号调节
+       * ============================================================ */
+
+      function getStored(key, fb) {
+        const v = parseInt(localStorage.getItem(key) || '', 10);
+        return isNaN(v) ? fb : v;
+      }
+
+      let danmukuFontSize = getStored(STORAGE_KEY_DANMUKU, 25);
+      let subtitleFontSize = getStored(STORAGE_KEY_SUBTITLE, 20);
+
+      let toastEl = null;
+      let toastTimer = null;
+
+      function ensureToast() {
+        if (toastEl) return toastEl;
+        toastEl = document.createElement('div');
+        toastEl.className = 'ol-font-toast';
+        document.body.appendChild(toastEl);
+        return toastEl;
+      }
+
+      function showToast(text) {
+        const el = ensureToast();
+        el.textContent = text;
+        el.classList.add('ol-show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.classList.remove('ol-show'), 800);
+      }
+
+      function applyFontSizes() {
+        document.querySelectorAll('.art-video-player').forEach((p) => {
+          p.style.setProperty('--ol-danmuku-font-size', danmukuFontSize + 'px');
+          p.style.setProperty('--ol-subtitle-font-size', subtitleFontSize + 'px');
+        });
+      }
+
+      function changeDanmukuFont(d) {
+        danmukuFontSize = Math.min(
+          DANMUKU_FONT_MAX,
+          Math.max(DANMUKU_FONT_MIN, danmukuFontSize + d)
+        );
+        localStorage.setItem(STORAGE_KEY_DANMUKU, String(danmukuFontSize));
+        applyFontSizes();
+        showToast('弹幕字号：' + danmukuFontSize + 'px');
+      }
+
+      function changeSubtitleFont(d) {
+        subtitleFontSize = Math.min(
+          SUBTITLE_FONT_MAX,
+          Math.max(SUBTITLE_FONT_MIN, subtitleFontSize + d)
+        );
+        localStorage.setItem(STORAGE_KEY_SUBTITLE, String(subtitleFontSize));
+        applyFontSizes();
+        showToast('字幕字号：' + subtitleFontSize + 'px');
+      }
+
+      function setupFontShortcuts() {
+        if (document.body.dataset.olFontShortcutsBound) return;
+        document.body.dataset.olFontShortcutsBound = 'true';
+
+        window.addEventListener('keydown', (e) => {
+          const tag = (e.target && e.target.tagName) || '';
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+          if (!document.querySelector('.art-video-player')) return;
+
+          if (e.key === '[') {
+            changeDanmukuFont(-DANMUKU_FONT_STEP);
+            e.preventDefault();
+          } else if (e.key === ']') {
+            changeDanmukuFont(DANMUKU_FONT_STEP);
+            e.preventDefault();
+          } else if (e.key === '-') {
+            changeSubtitleFont(-SUBTITLE_FONT_STEP);
+            e.preventDefault();
+          } else if (e.key === '=' || e.key === '+') {
+            changeSubtitleFont(SUBTITLE_FONT_STEP);
+            e.preventDefault();
+          }
+        });
+      }
+
+      /* ============================================================
+       *  左侧播放列表（带缩略图）
+       * ============================================================ */
+
+      function getSidebar() {
+        let el = document.getElementById(SIDEBAR_ID);
+        if (!el) {
+          el = document.createElement('div');
+          el.id = SIDEBAR_ID;
+          document.body.appendChild(el);
+        }
+        return el;
+      }
+
+      function getAuthHeaders() {
+        const token =
+          localStorage.getItem('token') ||
+          localStorage.getItem('openlist_token') ||
+          localStorage.getItem('ol_token') ||
+          '';
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = token;
+        return headers;
+      }
+
+      function pickThumb(item) {
+        return (
+          item.thumb ||
+          item.thumbnail ||
+          item.thumb_url ||
+          item.thumbnail_url ||
+          ''
+        );
+      }
+
+      async function fetchSidebarVideos(dirPath) {
+        try {
+          const resp = await fetch(SIDEBAR_API, {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({
+              path: dirPath,
+              page: 1,
+              per_page: 0,
+              refresh: false,
+            }),
+          });
+          if (!resp.ok) return [];
+          const json = await resp.json();
+          const content = (json && json.data && json.data.content) || [];
+
+          return content
+            .filter((item) => !item.is_dir && isVideoFile(safeDecode(item.name)))
+            .map((item) => {
+              const name = safeDecode(item.name);
+              const dirPrefix = dirPath.endsWith('/') ? dirPath : dirPath + '/';
+              return {
+                name,
+                path: dirPrefix + name,
+                thumb: pickThumb(item),
+                duration: item.duration || 0,
+              };
+            });
+        } catch (e) {
+          return [];
+        }
+      }
+
+      function ensureSidebarToggle() {
+        let btn = document.getElementById('ol-sidebar-toggle');
+        if (!btn) {
+          btn = document.createElement('button');
+          btn.id = 'ol-sidebar-toggle';
+          btn.title = '显示/隐藏播放列表';
+          btn.textContent = '\u2630';
+          btn.addEventListener('click', () => {
+            const body = document.body;
+            const sidebar = getSidebar();
+            const open = body.classList.toggle('ol-sidebar-open');
+            sidebar.classList.toggle('ol-show', open);
+            localStorage.setItem(STORAGE_KEY_SIDEBAR, open ? '1' : '0');
+          });
+          document.body.appendChild(btn);
+        }
+        return btn;
+      }
+
+      function renderSidebar(videos) {
+        const sidebar = getSidebar();
+        const body = document.body;
+        const toggle = ensureSidebarToggle();
+
+        if (!videos.length) {
+          // 无视频：隐藏侧栏，但不动 localStorage
+          sidebar.classList.remove('ol-show');
+          body.classList.remove('ol-sidebar-open');
+          toggle.style.display = 'none';
+          return;
+        }
+
+        toggle.style.display = 'flex';
+
+        // 有视频：按用户偏好决定显示/隐藏
+        const userPref = localStorage.getItem(STORAGE_KEY_SIDEBAR);
+        const shouldShow = userPref !== '0';
+
+        if (shouldShow) {
+          sidebar.classList.add('ol-show');
+          body.classList.add('ol-sidebar-open');
+        } else {
+          sidebar.classList.remove('ol-show');
+          body.classList.remove('ol-sidebar-open');
+        }
+
+        sidebar.innerHTML = videos
+          .map((v, i) => {
+            const dur = v.duration > 0 ? formatDuration(v.duration) : '';
+            const thumb = v.thumb
+              ? `<img src="${v.thumb}" loading="lazy" onerror="this.style.visibility='hidden'">`
+              : `<div style="width:100%;aspect-ratio:16/9;background:#222;border-radius:4px"></div>`;
+            return `
+              <div class="video-item" data-index="${i}" data-path="${v.path}">
+                ${thumb}
+                <div style="margin-top:6px;font-size:13px;color:#ddd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.name}">└─ ${v.name}</div>
+                ${dur ? `<div style="font-size:11px;color:#2ecc71;font-family:ui-monospace,monospace;margin-top:2px">${dur}</div>` : ''}
+              </div>`;
+          })
+          .join('');
+
+        sidebar.querySelectorAll('.video-item').forEach((el) => {
+          el.addEventListener('click', () => {
+            const path = el.dataset.path;
+            if (!path) return;
+            location.href = path;
+          });
+        });
+
+        updateActiveClass();
+      }
+
+      // 只更新高亮，不滚动
+      function updateActiveClass() {
+        const sidebar = document.getElementById(SIDEBAR_ID);
+        if (!sidebar) return null;
+        const cur = decodeURIComponent(location.pathname);
+        let activeEl = null;
+        sidebar.querySelectorAll('.video-item').forEach((el) => {
+          const p = el.dataset.path || '';
+          const isActive = p && cur.endsWith(p.split('/').pop());
+          el.classList.toggle('active', isActive);
+          if (isActive) activeEl = el;
+        });
+        return activeEl;
+      }
+
+      // 把当前项滚到中间（只在需要时调用）
+      function scrollActiveIntoView() {
+        const sidebar = document.getElementById(SIDEBAR_ID);
+        if (!sidebar) return;
+        const activeEl = sidebar.querySelector('.video-item.active');
+        if (!activeEl) return;
+        const sRect = sidebar.getBoundingClientRect();
+        const eRect = activeEl.getBoundingClientRect();
+        const offset =
+          eRect.top - sRect.top - sRect.height / 2 + eRect.height / 2;
+        sidebar.scrollTop += offset;
+      }
+
+      async function updateSidebar() {
+        let rawPath = decodeURIComponent(location.pathname);
+        const lastSeg = rawPath.split('/').filter(Boolean).pop() || '';
+        const isPlayingFile = rawPath && !rawPath.endsWith('/') && isVideoFile(lastSeg);
+        let dirPath = isPlayingFile
+          ? rawPath.slice(0, rawPath.lastIndexOf('/') + 1)
+          : rawPath;
+        dirPath = normalizePath(dirPath);
+
+        // 目录没变：只更新高亮，绝不滚动
+        if (dirPath === sidebarCurrentPath) {
+          updateActiveClass();
+          return;
+        }
+        sidebarCurrentPath = dirPath;
+
+        const videos = await fetchSidebarVideos(dirPath);
+        sidebarVideos = videos;
+        renderSidebar(videos);
+
+        // 只有重新渲染后，才做一次定位
+        scrollActiveIntoView();
+      }
+
+      /* ============================================================
+       *  主入口
+       * ============================================================ */
+
+      function run() {
+        processListRows();
+        addTypeHeader();
+        hideSubtitlesInGrid();
+        updateTotalSize();
+
+        updateSidebar();
+
+        setupBottomHover();
+        setupWheelSeek();
+        setupTouchGestures();
+
+        guardDanmukuLayer();
+        setupFontShortcuts();
+        applyFontSizes();
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', run);
+      } else {
+        run();
+      }
+
+      const observer = new MutationObserver(() => requestAnimationFrame(run));
+      window.addEventListener('load', () => {
+        observer.observe(document.body, { childList: true, subtree: true });
+      });
+    })();
+  </script>
+</head>
+<body>
+</body>
+</html>
