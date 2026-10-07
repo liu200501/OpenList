@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (例如 v4.2.6)'
+        description: 'Release tag (例如 v4.2.7beta)'
         required: true
         type: string
       release_name:
@@ -50,7 +50,8 @@ jobs:
         uses: OpenListTeam/cgo-actions@v1.3.0
         with:
           targets: windows-amd64
-          flags: '-ldflags='
+          # 关键优化：-s 去符号表，-w 去调试信息，-trimpath 去本地路径，-buildvcs=false 去 Git 信息
+          flags: '-ldflags=-s -w -trimpath -buildvcs=false'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
@@ -61,6 +62,14 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
           output: openlist-windows-amd64$ext
+
+      # 关键优化：用 UPX 再压一遍，能再砍掉 50% 以上
+      - name: Compress with UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+          upx --best --lzma build/openlist-windows-amd64.exe
+          ls -lh build/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
