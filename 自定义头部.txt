@@ -1,0 +1,69 @@
+<style>
+  body.ol-sidebar-open {
+    padding-left: 320px !important;
+    box-sizing: border-box !important;
+  }
+
+  body.ol-sidebar-open .video-player-container,
+  body.ol-sidebar-open video {
+    margin-left: 0 !important;
+  }
+
+  #custom-video-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 320px;
+    height: 100vh;
+    overflow-y: auto;
+    background: #1a1a1a;
+    z-index: 9999;
+    padding: 10px;
+    box-sizing: border-box;
+    display: none;
+  }
+  #custom-video-sidebar.ol-show {
+    display: block;
+  }
+
+  .video-item {
+    padding: 8px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-bottom: 8px;
+  }
+  .video-item:hover { background: #333; }
+  .video-item.active { background: #2563eb; }
+  .video-item img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    border-radius: 4px;
+    display: block;
+  }
+
+  #ol-sidebar-toggle {
+    position: fixed;
+    top: 10px;
+    left: 330px;
+    z-index: 10000;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: left 0.2s ease, background 0.15s ease;
+  }
+  #ol-sidebar-toggle:hover {
+    background: rgba(0, 0, 0, 0.85);
+  }
+  body:not(.ol-sidebar-open) #ol-sidebar-toggle {
+    left: 10px;
+  }
+</style>
