@@ -1,37 +1,42 @@
-name: Test Build
+name: Release Build (Windows amd64)
 
 on:
-  pull_request:
-    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (例如 v4.2.6)'
+        required: true
+        type: string
+      release_name:
+        description: 'Release 标题（留空则用 tag）'
+        required: false
+        type: string
+      release_body:
+        description: 'Release 描述（支持 Markdown，可多行）'
+        required: false
+        type: string
+      prerelease:
+        description: '是否为预发布？'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
   build:
-    strategy:
-      matrix:
-        target:
-          - darwin-amd64
-          - darwin-arm64
-          - windows-amd64
-          - linux-arm64-musl
-          - linux-amd64-musl
-          - windows-arm64
-          - android-arm64
-    name: Build ${{ matrix.target }}
+    name: Build Windows amd64
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - uses: benjlevesque/short-sha@dbe07338b37c456ce06d23409b35a56a7815eef4 # v4.0
-        id: short-sha
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
 
@@ -42,12 +47,11 @@ jobs:
           FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
       - name: Build
-        uses: OpenListTeam/cgo-actions@d760a8ec1a6be1f8ec181229e11cb2671797f9e0 # v1.3.0
+        uses: OpenListTeam/cgo-actions@v1.3.0
         with:
-          targets: ${{ matrix.target }}
-          flags: ${{ contains(matrix.target, '-musl') && '-ldflags=-linkmode external -extldflags ''-static -fpic''' || '-ldflags=' }}
-          static-link-for-musl: true
-          musl-target-format: $os-$musl-$arch
+          targets: windows-amd64
+          flags: '-ldflags='
+          static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
           x-flags: |
@@ -56,20 +60,34 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          output: openlist$ext
-
-      - name: Verify musl binary is static
-        if: contains(matrix.target, '-musl')
-        run: |
-          set -e
-          if readelf -l build/openlist | grep -q "Requesting program interpreter"; then
-            echo "Dynamic binary detected: build/openlist"
-            readelf -l build/openlist | grep "Requesting program interpreter" || true
-            exit 1
-          fi
+          output: openlist-windows-amd64$ext
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v4
         with:
-          name: openlist_${{ steps.short-sha.outputs.sha }}_${{ matrix.target }}
+          name: openlist_windows_amd64
           path: build/*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.release_name || inputs.tag }}
+          body: ${{ inputs.release_body }}
+          prerelease: ${{ inputs.prerelease == 'true' }}
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
