@@ -9,7 +9,6 @@ type Addition struct {
 	driver.RootPath
 	DirectorySize    bool   `json:"directory_size" default:"false" help:"This might impact host performance"`
 	Thumbnail        bool   `json:"thumbnail" required:"true" help:"enable thumbnail"`
-	ThumbnailWidth   int    `json:"thumbnail_width" type:"number" default:"144" required:"false" help:"Thumbnail width in pixels. Height is scaled proportionally. If set to 0, the original width is used."`
 	PDFThumbnail     bool   `json:"pdf_thumbnail" default:"false" required:"false" help:"Generate PDF first-page thumbnails with Quick Look on macOS"`
 	ThumbCacheFolder string `json:"thumb_cache_folder"`
 	ThumbConcurrency string `json:"thumb_concurrency" default:"16" required:"false" help:"Number of concurrent thumbnail generation goroutines. This controls how many thumbnails can be generated in parallel."`

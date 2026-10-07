@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -22,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -40,8 +42,8 @@ import (
 )
 
 const (
-	KEY_HEX_1     = "73634235495062495331515373756c734e7253306c673d3d" // 第一层 AES 解密密钥
-	KEY_HEX_2     = "7150714477323633586746674c337538"                 // 第二层 AES 解密密钥
+	KEY_HEX_1     = "73634235495062495331515373756c734e7253306c673d3d"
+	KEY_HEX_2     = "7150714477323633586746674c337538"
 	mailPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnsOHTFtwW5rq/8gGhPlM5Z3RPdeN/d+FYIHb5JmcfBOCozXuT8c+0anvxtkjzghixwNlnmBuhN8OYfS789YuH/qReQbHC7OdlisLildNWPHRNUYcPa0W3lXSG3+81CXK7FDXPvXo5ubw2GqVbIsccMarI1dyfXdi4ITiCXvmM9wYBdUs9yXtoorhlpyYUI2GV8HNsQjWK9P5QZHT3ox5Qy+mjRmvv6RUFJLPOMkOS/pGZ0DwC1ypFZBxstW0/ftVupdOmGWvW7J2/e3dq3A/UvIkC4YUY/diL1wighJx1G9MiRROISjNMvNyUDSTqPJy516+l3sgHEbc067QIJx2NQIDAQAB"
 )
 
@@ -58,7 +60,6 @@ const (
 	credentialStateCookiesOnly
 )
 
-// do others that not defined in Driver interface
 func (d *Yun139) isFamily() bool {
 	return d.Type == MetaFamily
 }
@@ -145,8 +146,6 @@ func (d *Yun139) refreshToken() error {
 	return nil
 }
 
-// loginAfterAuthorizationFailure deliberately skips cookie fast login. Mail
-// cookies are only reused as device context for the password login request.
 func (d *Yun139) loginAfterAuthorizationFailure(cause error) error {
 	log.Warnf("139yun: %v; trying password login.", cause)
 	newAuth, err := d.loginWithPassword()
@@ -179,9 +178,7 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 		"Authorization":  "Basic " + d.getAuthorization(),
 		"mcloud-channel": "1000101",
 		"mcloud-client":  "10701",
-		//"mcloud-route": "001",
 		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
-		//"mcloud-skey":"",
 		"mcloud-version":         "7.14.0",
 		"Origin":                 "https://yun.139.com",
 		"Referer":                "https://yun.139.com/w/",
@@ -204,12 +201,11 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 	}
 	log.Debugf("[139] response body: %s", res.String())
 	if !e.Success {
-		// Always try to unmarshal to the specific response type first if 'resp' is provided.
 		if resp != nil {
 			err = utils.Json.Unmarshal(res.Body(), resp)
 			if err != nil {
 				log.Debugf("[139] failed to unmarshal response to specific type: %v", err)
-				return nil, err // Return unmarshal error
+				return nil, err
 			}
 			if createBatchOprTaskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
 				log.Debugf("[139] CreateBatchOprTaskResp.Result.ResultCode: %s", createBatchOprTaskResp.Result.ResultCode)
@@ -218,7 +214,7 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 				}
 			}
 		}
-		return nil, errors.New(e.Message) // Fallback to original error if not handled
+		return nil, errors.New(e.Message)
 	}
 	if resp != nil {
 		err = utils.Json.Unmarshal(res.Body(), resp)
@@ -254,9 +250,7 @@ func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error
 		"Authorization":  "Basic " + d.getAuthorization(),
 		"mcloud-channel": "1000101",
 		"mcloud-client":  "10701",
-		//"mcloud-route": "001",
 		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
-		//"mcloud-skey":"",
 		"mcloud-version":         "7.14.0",
 		"Origin":                 "https://yun.139.com",
 		"Referer":                "https://yun.139.com/w/",
@@ -335,7 +329,6 @@ func (d *Yun139) getFiles(catalogID string) ([]model.Obj, error) {
 					HashInfo: utils.NewHashInfo(utils.MD5, content.Digest),
 				},
 				Thumbnail: model.Thumbnail{Thumbnail: content.ThumbnailURL},
-				// Thumbnail: content.BigthumbnailURL,
 			}
 			files = append(files, &f)
 		}
@@ -373,8 +366,6 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 			},
 			"sortDirection": 1,
 		})
-		// 传入 catalogID 是文件夹的ID，而不是完整路径
-		// 当传入catalogID为家庭云根目录时，直接留空
 		if catalogID == d.ProviderRoot {
 			data["catalogID"] = ""
 		}
@@ -383,7 +374,6 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 返回的是完整的Path: root:/<UserRootID>/<CatalogID>/.../<CatalogID>
 		path := resp.Data.Path
 		for _, catalog := range resp.Data.CloudCatalogList {
 			f := model.Object{
@@ -393,7 +383,7 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 				IsFolder: true,
 				Modified: getTime(catalog.LastUpdateTime),
 				Ctime:    getTime(catalog.CreateTime),
-				Path:     path, // 文件夹上一级的Path
+				Path:     path,
 			}
 			files = append(files, &f)
 		}
@@ -405,10 +395,9 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 					Size:     content.ContentSize,
 					Modified: getTime(content.LastUpdateTime),
 					Ctime:    getTime(content.CreateTime),
-					Path:     path, // 文件所在目录的Path
+					Path:     path,
 				},
 				Thumbnail: model.Thumbnail{Thumbnail: content.ThumbnailURL},
-				// Thumbnail: content.BigthumbnailURL,
 			}
 			files = append(files, &f)
 		}
@@ -448,7 +437,7 @@ func (d *Yun139) groupGetFiles(catalogID string) ([]model.Obj, error) {
 				IsFolder: true,
 				Modified: getTime(catalog.UpdateTime),
 				Ctime:    getTime(catalog.CreateTime),
-				Path:     catalog.Path, // 文件夹的真实Path， root:/开头
+				Path:     catalog.Path,
 			}
 			files = append(files, &f)
 		}
@@ -460,10 +449,9 @@ func (d *Yun139) groupGetFiles(catalogID string) ([]model.Obj, error) {
 					Size:     content.ContentSize,
 					Modified: getTime(content.UpdateTime),
 					Ctime:    getTime(content.CreateTime),
-					Path:     path, // 文件所在目录的Path
+					Path:     path,
 				},
 				Thumbnail: model.Thumbnail{Thumbnail: content.ThumbnailURL},
-				// Thumbnail: content.BigthumbnailURL,
 			}
 			files = append(files, &f)
 		}
@@ -914,7 +902,6 @@ func (d *Yun139) newPost(pathname string, data interface{}, resp interface{}) ([
 	var url string
 	switch d.Type {
 	case MetaFamily, MetaGroup:
-		// this is on purpose
 		url = d.getGroupCloudHost() + pathname
 	default:
 		url = d.getPersonalCloudHost() + pathname
@@ -1061,7 +1048,6 @@ func (d *Yun139) getGroupCloudHost() string {
 }
 
 func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, uploadPartInfos []PersonalPartInfo, ss streamPkg.StreamSectionReader, p *driver.Progress) error {
-	// 确保数组以 PartNumber 从小到大排序
 	sort.Slice(uploadPartInfos, func(i, j int) bool {
 		return uploadPartInfos[i].PartNumber < uploadPartInfos[j].PartNumber
 	})
@@ -1080,11 +1066,9 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 			return getErr
 		}
 
-		// Save progress before this part so retries don't double-count bytes
 		partDoneStart := p.Done
 		err := retry.Do(
 			func() error {
-				// Reset progress to the start of this part on each attempt
 				p.Done = partDoneStart
 				if _, seekErr := rd.Seek(0, io.SeekStart); seekErr != nil {
 					return seekErr
@@ -1343,10 +1327,9 @@ func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("--- 执行步骤 1: 登录 API ---")
 	loginURL := mailPasswordURL
 
-	// 密码 SHA1 哈希
 	hashedPassword := sha1Hash(fmt.Sprintf("fetion.com.cn:%s", d.Password))
 
-	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
+	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10)
 
 	loginHeaders := map[string]string{
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -1439,7 +1422,6 @@ func (d *Yun139) step2_get_single_token(sid string) (string, error) {
 
 	exchangeArtifactURL := fmt.Sprintf("https://smsrebuild1.mail.10086.cn/setting/s?func=%s&sid=%s&cguid=%s", url.QueryEscape("umc:getArtifact"), sid, cguid)
 
-	// 从 MailCookies 中提取 RMKEY
 	var rmkey string
 	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
@@ -1494,23 +1476,18 @@ func escapeXML(value string) string {
 	return escaped.String()
 }
 
-// --- 辅助函数：加密/解密 ---
-
-// sha1Hash 计算 SHA1 哈希值，返回十六进制字符串。
 func sha1Hash(data string) string {
 	h := sha1.New()
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// pkcs7_pad PKCS7 填充
 func pkcs7_pad(data []byte, blockSize int) []byte {
 	padding := blockSize - len(data)%blockSize
 	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
 	return append(data, padtext...)
 }
 
-// pkcs7_unpad PKCS7 去填充
 func pkcs7_unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
@@ -1523,7 +1500,6 @@ func pkcs7_unpad(data []byte) ([]byte, error) {
 	return data[:(length - unpadding)], nil
 }
 
-// aes_ecb_decrypt AES/ECB/Pkcs7 解密，输入为十六进制字符串。
 func aes_ecb_decrypt(ciphertext []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -1544,7 +1520,6 @@ func aes_ecb_decrypt(ciphertext []byte, key []byte) ([]byte, error) {
 	return pkcs7_unpad(decrypted)
 }
 
-// 以下提供 camelCase 的 AES CBC 加解密，供文件中其它位置调用（并支持传入 IV）。
 func aesCbcEncrypt(plaintext []byte, key []byte, iv []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -1577,7 +1552,6 @@ func aesCbcDecrypt(ciphertext []byte, key []byte, iv []byte) ([]byte, error) {
 	return pkcs7_unpad(decrypted)
 }
 
-// sortedJsonStringify 对 JSON 对象进行排序并字符串化。
 func sortedJsonStringify(obj interface{}) (string, error) {
 	if obj == nil {
 		return "null", nil
@@ -1585,12 +1559,10 @@ func sortedJsonStringify(obj interface{}) (string, error) {
 
 	switch v := obj.(type) {
 	case string:
-		// 尝试解析为 JSON，如果成功则递归处理
 		var parsed interface{}
 		if err := jsoniter.Unmarshal([]byte(v), &parsed); err == nil {
 			return sortedJsonStringify(parsed)
 		}
-		// 如果不是 JSON 字符串，则直接返回 JSON 字符串化的结果
 		return jsoniter.MarshalToString(v)
 	case int, float64, bool:
 		return fmt.Sprintf("%v", v), nil
@@ -1618,7 +1590,6 @@ func sortedJsonStringify(obj interface{}) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			// Use jsoniter.MarshalToString for the key to ensure it's quoted correctly
 			keyStr, err := jsoniter.MarshalToString(key)
 			if err != nil {
 				return "", err
@@ -1627,29 +1598,23 @@ func sortedJsonStringify(obj interface{}) (string, error) {
 		}
 		return fmt.Sprintf("{%s}", strings.Join(pairs, ",")), nil
 	default:
-		// Fallback for other types, e.g., numbers, booleans, or unhandled complex types
-		// Use jsoniter's default marshalling for these
 		return jsoniter.MarshalToString(v)
 	}
 }
 
-// yun139EncryptedRequest handles the common encrypted request/response flow.
 func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers map[string]string, aesKeyHex string, resp interface{}) ([]byte, error) {
-	// 1. Decode AES key
 	aesKey, err := hex.DecodeString(aesKeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("yun139EncryptedRequest: failed to decode AES key: %w", err)
 	}
 
-	// 2. Marshal and sort the request body
 	sortedJson, err := sortedJsonStringify(body)
 	if err != nil {
 		return nil, fmt.Errorf("yun139EncryptedRequest: failed to marshal and sort body: %w", err)
 	}
 	log.Debugf("yun139EncryptedRequest: Request Body (plaintext): %s", sortedJson)
 
-	// 3. Encrypt the body using AES/CBC
-	iv := make([]byte, 16) // 16 bytes for AES-128
+	iv := make([]byte, 16)
 	if _, err := crypto_rand.Read(iv); err != nil {
 		return nil, fmt.Errorf("yun139EncryptedRequest: failed to generate IV: %w", err)
 	}
@@ -1659,7 +1624,6 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 	}
 	payload := base64.StdEncoding.EncodeToString(append(iv, encryptedBody...))
 
-	// 4. Make the request
 	res, err := base.RestyClient.R().
 		SetHeaders(headers).
 		SetBody(payload).
@@ -1673,7 +1637,6 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 		return nil, fmt.Errorf("yun139EncryptedRequest: unexpected status code %d: %s", res.StatusCode(), res.String())
 	}
 
-	// 5. Decrypt the response
 	respBody := res.Body()
 	var decryptedBytes []byte
 
@@ -1701,7 +1664,6 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 
 	log.Debugf("yun139EncryptedRequest: Response Body (decrypted): %s", string(decryptedBytes))
 
-	// 6. Unmarshal to the final response struct
 	if resp != nil {
 		err = utils.Json.Unmarshal(decryptedBytes, resp)
 		if err != nil {
@@ -1716,7 +1678,6 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	log.Debugf("\n--- 执行步骤 3: 单点登录 API ---")
 	ssoLoginURL := "https://user-njs.yun.139.com/user/thirdlogin"
 
-	// 构建原始请求体
 	ssoRequestBodyRaw := base.Json{
 		"clientkey_decrypt": "l3TryM&Q+X7@dzwk)qP",
 		"clienttype":        "886",
@@ -1742,7 +1703,6 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 		"User-Agent":          "okhttp/3.12.2",
 	}
 
-	// 使用通用加密请求函数
 	decryptedLayer1StrBytes, err := d.yun139EncryptedRequest(ssoLoginURL, ssoRequestBodyRaw, ssoLoginHeaders, KEY_HEX_1, nil)
 	if err != nil {
 		return "", fmt.Errorf("step3 encrypted request failed: %w", err)
@@ -1754,7 +1714,6 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	}
 	log.Debugf("DEBUG: 第一层解密提取到 hex_inner: %s...", hexInner[:min(len(hexInner), 50)])
 
-	// 第二层解密
 	key2, err := hex.DecodeString(KEY_HEX_2)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode KEY_HEX_2: %w", err)
@@ -1769,14 +1728,12 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	}
 	log.Debugf("DEBUG: 最终解密结果: %s", string(finalJsonStrBytes))
 
-	// 提取 authToken
 	authToken := jsoniter.Get(finalJsonStrBytes, "authToken").ToString()
 	if authToken == "" {
 		return "", errors.New("failed to extract authToken from final decryption result")
 	}
 	log.Debugf("DEBUG: 提取到 authToken: %s", authToken)
 
-	// 提取 account 和 userDomainId
 	account := jsoniter.Get(finalJsonStrBytes, "account").ToString()
 	userDomainId := jsoniter.Get(finalJsonStrBytes, "userDomainId").ToString()
 
@@ -1849,7 +1806,6 @@ func (d *Yun139) validateAndInitCredentials() error {
 
 	switch state {
 	case credentialStateAuthorization:
-		// Authorization is refreshed by Init immediately after this helper returns.
 		log.Debugf("139yun: Authorization exists, skipping initialization login.")
 		return nil
 	case credentialStateFullLogin, credentialStateCookiesOnly:
@@ -1929,7 +1885,7 @@ func (d *Yun139) loginWithPassword() (string, error) {
 	}
 	log.Infof("Step 3 success, new authorization generated.")
 
-	d.Authorization = newAuth // Ensure Authorization is also updated before saving
+	d.Authorization = newAuth
 	op.MustSaveDriverStorage(d)
 	return newAuth, nil
 }
@@ -1945,7 +1901,7 @@ func (d *Yun139) andAlbumRequest(pathname string, body interface{}, resp interfa
 		"x-huawei-channelsrc": "10246600",
 		"x-sdk-channelsrc":    "",
 		"x-mm-source":         "0",
-		"x-deviceinfo":        "1|127.0.0.1|1|12.3.2|Xiaomi|23116PN5BC||02-00-00-00-00-00|android 15|1440x3200|android|zh||||032|0|", //重要参数
+		"x-deviceinfo":        "1|127.0.0.1|1|12.3.2|Xiaomi|23116PN5BC||02-00-00-00-00-00|android 15|1440x3200|android|zh||||032|0|",
 		"content-type":        "application/json; charset=utf-8",
 		"user-agent":          "okhttp/4.11.0",
 		"accept-encoding":     "gzip",
@@ -1984,7 +1940,6 @@ func (d *Yun139) handleMetaGroupCopy(ctx context.Context, srcObj, dstDir model.O
 	return err
 }
 
-// getGroupRootByCloudID 查询 group 上层信息，优先返回 parentCatalogID，回退到 catalogList[0].path
 func (d *Yun139) getGroupRootByCloudID(cloudID string) (string, error) {
 	pathname := "/orchestration/group-rebuild/catalog/v1.0/queryGroupContentList"
 	body := base.Json{
@@ -2022,9 +1977,6 @@ func (d *Yun139) getGroupRootByCloudID(cloudID string) (string, error) {
 	return "", fmt.Errorf("no root found in group response")
 }
 
-// dirPath returns the full path for a directory object.
-// For family root (Path="" from framework), needs "root:/"+id prefix.
-// Non-root objects already have their API path in GetPath() from List responses.
 func (d *Yun139) dirPath(dir model.Obj) string {
 	p := dir.GetPath()
 	id := dir.GetID()
@@ -2037,10 +1989,7 @@ func (d *Yun139) dirPath(dir model.Obj) string {
 	return path.Join(p, id)
 }
 
-// getFamilyRootPath 查询 family 的上层 path（data.path）
-// 返回值已去除前缀 "root:/"（或 "root:"），直接返回纯 ID 或 path 部分，便于持久化为 RootFolderID。
 func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
-	// 使用 v1.2 接口（代码日志中已有该请求），pageSize 取 1 足够获取 path 字段
 	pathname := "/orchestration/familyCloud-rebuild/content/v1.2/queryContentList"
 	body := base.Json{
 		"catalogID":   "",
@@ -2067,7 +2016,6 @@ func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
 	if dataObj == nil {
 		return "", fmt.Errorf("invalid family response data")
 	}
-	// helper to strip "root:/" or "root:" prefix
 	stripRoot := func(s string) string {
 		s = strings.TrimSpace(s)
 		s = strings.TrimPrefix(s, "root:/")
@@ -2077,7 +2025,6 @@ func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
 	if p, ok := dataObj["path"].(string); ok && p != "" {
 		return stripRoot(p), nil
 	}
-	// 回退：有时 path 在 cloudCatalogList.catalogList 中
 	if cl, ok := dataObj["cloudCatalogList"].([]interface{}); ok && len(cl) > 0 {
 		if first, ok := cl[0].(map[string]interface{}); ok {
 			if p, ok := first["path"].(string); ok && p != "" {
@@ -2086,4 +2033,72 @@ func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no path found in family response")
+}
+
+// ============================================================
+// ★ 新增：视频时长获取与缓存（含持久化）
+// ============================================================
+
+var videoExts = map[string]bool{
+	"mp4": true, "mkv": true, "avi": true, "flv": true,
+	"mov": true, "ts": true, "webm": true, "m4v": true,
+	"mpg": true, "mpeg": true, "rmvb": true, "3gp": true,
+}
+
+func isVideoFile(name string) bool {
+	ext := strings.ToLower(path.Ext(name))
+	ext = strings.TrimPrefix(ext, ".")
+	return videoExts[ext]
+}
+
+// durationCache 进程内一级缓存：fileID -> duration(秒)
+var durationCache sync.Map
+
+// fetchVideoDuration 调用 /videoPreview/getPreviewInfo 获取视频时长。
+// 优先读持久化缓存，未命中才请求 139，拿到后同时写入内存和持久化缓存。
+func (d *Yun139) fetchVideoDuration(fileID string) float64 {
+	if fileID == "" {
+		return 0
+	}
+
+	// 0) 首次调用加载持久化缓存
+	loadDurationCacheOnce()
+
+	// 1) 读持久化缓存
+	if v := getPersistDuration(fileID); v > 0 {
+		return v
+	}
+
+	// 2) 读进程内缓存
+	if v, ok := durationCache.Load(fileID); ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			// 顺便写入持久化缓存
+			setPersistDuration(fileID, f)
+			return f
+		}
+	}
+
+	// 3) 请求 139 接口
+	data := base.Json{
+		"category": "video",
+		"fileId":   fileID,
+	}
+	var resp VideoPreviewResp
+	_, err := d.personalPost("/videoPreview/getPreviewInfo", data, &resp)
+	if err != nil {
+		log.Debugf("[139] fetchVideoDuration(%s) error: %v", fileID, err)
+		return 0
+	}
+	if resp.Data.Meta.Duration == "" {
+		return 0
+	}
+	dur, err := strconv.ParseFloat(resp.Data.Meta.Duration, 64)
+	if err != nil || math.IsNaN(dur) || math.IsInf(dur, 0) || dur <= 0 {
+		return 0
+	}
+
+	// 4) 写两层缓存
+	durationCache.Store(fileID, dur)
+	setPersistDuration(fileID, dur)
+	return dur
 }

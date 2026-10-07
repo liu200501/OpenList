@@ -1,9 +1,12 @@
 package handles
 
 import (
+	"context"
 	"fmt"
 	stdpath "path"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -44,6 +47,8 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
+	// ★ 视频时长（秒），非视频或未取到时为 0
+	Duration float64 `json:"duration,omitempty"`
 }
 
 type FsListResp struct {
@@ -225,6 +230,57 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 	return total, objs[start:end]
 }
 
+// ============================================================
+// 视频时长进程内缓存 + 从 Link.Header 取时长
+// ============================================================
+
+// listDurationCache 缓存 path -> duration（秒），避免重复请求
+var listDurationCache sync.Map
+
+// getVideoDuration 调用 fs.Link 拿 X-Video-Duration
+// 只对视频文件有效，且只对 MetaPersonalNew 生效
+func getVideoDuration(ctx context.Context, reqPath string) float64 {
+	// 1) 读缓存
+	if v, ok := listDurationCache.Load(reqPath); ok {
+		if f, ok := v.(float64); ok {
+			return f
+		}
+	}
+
+	// 2) 调 fs.Link
+	link, _, err := fs.Link(ctx, reqPath, model.LinkArgs{})
+	if err != nil {
+		return 0
+	}
+	defer link.Close()
+
+	if link.Header == nil {
+		return 0
+	}
+	durStr := link.Header.Get("X-Video-Duration")
+	if durStr == "" {
+		return 0
+	}
+	dur, err := strconv.ParseFloat(durStr, 64)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+
+	// 3) 写缓存
+	listDurationCache.Store(reqPath, dur)
+	return dur
+}
+
+// ★ getObjDuration 从 obj 上读时长
+// 139 驱动在 List() 里会把视频 obj 包一层 objWithDuration，
+// 附带 GetDuration() 方法，这里通过接口断言把它读出来。
+func getObjDuration(obj model.Obj) float64 {
+	if p, ok := obj.(interface{ GetDuration() float64 }); ok {
+		return p.GetDuration()
+	}
+	return 0
+}
+
 func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 	var resp []ObjResp
 	for _, obj := range objs {
@@ -242,6 +298,8 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
+			// ★ 从 obj 上读时长（139 驱动已填充，未命中时为 0）
+			Duration: getObjDuration(obj),
 		})
 	}
 	return resp
@@ -304,6 +362,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 		return
 	}
 	var rawURL string
+	var extraHeader string
 
 	storage, err := fs.GetStorage(reqPath, &fs.GetStoragesArgs{})
 	provider, ok := model.GetProvider(obj)
@@ -328,11 +387,9 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 					query)
 			}
 		} else {
-			// file have raw url
 			if url, ok := model.GetUrl(obj); ok {
 				rawURL = url
 			} else {
-				// if storage is not proxy, use raw url by fs.Link
 				link, _, err := fs.Link(c.Request.Context(), reqPath, model.LinkArgs{
 					IP:       c.ClientIP(),
 					Header:   c.Request.Header,
@@ -344,6 +401,13 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 				}
 				defer link.Close()
 				rawURL = link.URL
+				if link.Header != nil {
+					for _, k := range []string{"X-Video-Duration"} {
+						if v := link.Header.Get(k); v != "" {
+							extraHeader += k + ": " + v + "\n"
+						}
+					}
+				}
 			}
 		}
 	}
@@ -358,6 +422,16 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
 	mountDetails, _ := model.GetStorageDetails(obj)
+
+	respHeader := getHeader(meta, reqPath)
+	if extraHeader != "" {
+		if respHeader != "" {
+			respHeader += "\n" + extraHeader
+		} else {
+			respHeader = extraHeader
+		}
+	}
+
 	common.SuccessResp(c, FsGetResp{
 		ObjResp: ObjResp{
 			Name:         obj.GetName(),
@@ -371,10 +445,11 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			Thumb:        thumb,
 			MountDetails: mountDetails,
+			Duration:     getObjDuration(obj),
 		},
 		RawURL:   rawURL,
 		Readme:   getReadme(meta, reqPath),
-		Header:   getHeader(meta, reqPath),
+		Header:   respHeader,
 		Provider: provider,
 		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
 	})

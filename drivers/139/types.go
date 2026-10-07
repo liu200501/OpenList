@@ -21,86 +21,18 @@ type BaseResp struct {
 type Catalog struct {
 	CatalogID   string `json:"catalogID"`
 	CatalogName string `json:"catalogName"`
-	//CatalogType     int         `json:"catalogType"`
 	CreateTime string `json:"createTime"`
 	UpdateTime string `json:"updateTime"`
-	//IsShared        bool        `json:"isShared"`
-	//CatalogLevel    int         `json:"catalogLevel"`
-	//ShareDoneeCount int         `json:"shareDoneeCount"`
-	//OpenType        int         `json:"openType"`
-	//ParentCatalogID string      `json:"parentCatalogId"`
-	//DirEtag         int         `json:"dirEtag"`
-	//Tombstoned      int         `json:"tombstoned"`
-	//ProxyID         interface{} `json:"proxyID"`
-	//Moved           int         `json:"moved"`
-	//IsFixedDir      int         `json:"isFixedDir"`
-	//IsSynced        interface{} `json:"isSynced"`
-	//Owner           string      `json:"owner"`
-	//Modifier        interface{} `json:"modifier"`
-	//Path            string      `json:"path"`
-	//ShareType       int         `json:"shareType"`
-	//SoftLink        interface{} `json:"softLink"`
-	//ExtProp1        interface{} `json:"extProp1"`
-	//ExtProp2        interface{} `json:"extProp2"`
-	//ExtProp3        interface{} `json:"extProp3"`
-	//ExtProp4        interface{} `json:"extProp4"`
-	//ExtProp5        interface{} `json:"extProp5"`
-	//ETagOprType     int         `json:"ETagOprType"`
 }
 
 type Content struct {
 	ContentID   string `json:"contentID"`
 	ContentName string `json:"contentName"`
-	//ContentSuffix   string      `json:"contentSuffix"`
 	ContentSize int64 `json:"contentSize"`
-	//ContentDesc     string      `json:"contentDesc"`
-	//ContentType     int         `json:"contentType"`
-	//ContentOrigin   int         `json:"contentOrigin"`
 	CreateTime string `json:"createTime"`
 	UpdateTime string `json:"updateTime"`
-	//CommentCount    int         `json:"commentCount"`
 	ThumbnailURL string `json:"thumbnailURL"`
-	//BigthumbnailURL string      `json:"bigthumbnailURL"`
-	//PresentURL      string      `json:"presentURL"`
-	//PresentLURL     string      `json:"presentLURL"`
-	//PresentHURL     string      `json:"presentHURL"`
-	//ContentTAGList  interface{} `json:"contentTAGList"`
-	//ShareDoneeCount int         `json:"shareDoneeCount"`
-	//Safestate       int         `json:"safestate"`
-	//Transferstate   int         `json:"transferstate"`
-	//IsFocusContent  int         `json:"isFocusContent"`
-	//UpdateShareTime interface{} `json:"updateShareTime"`
-	//UploadTime      string      `json:"uploadTime"`
-	//OpenType        int         `json:"openType"`
-	//AuditResult     int         `json:"auditResult"`
-	//ParentCatalogID string      `json:"parentCatalogId"`
-	//Channel         string      `json:"channel"`
-	//GeoLocFlag      string      `json:"geoLocFlag"`
 	Digest string `json:"digest"`
-	//Version         string      `json:"version"`
-	//FileEtag        string      `json:"fileEtag"`
-	//FileVersion     string      `json:"fileVersion"`
-	//Tombstoned      int         `json:"tombstoned"`
-	//ProxyID         string      `json:"proxyID"`
-	//Moved           int         `json:"moved"`
-	//MidthumbnailURL string      `json:"midthumbnailURL"`
-	//Owner           string      `json:"owner"`
-	//Modifier        string      `json:"modifier"`
-	//ShareType       int         `json:"shareType"`
-	//ExtInfo         struct {
-	//	Uploader string `json:"uploader"`
-	//	Address  string `json:"address"`
-	//} `json:"extInfo"`
-	//Exif struct {
-	//	CreateTime    string      `json:"createTime"`
-	//	Longitude     interface{} `json:"longitude"`
-	//	Latitude      interface{} `json:"latitude"`
-	//	LocalSaveTime interface{} `json:"localSaveTime"`
-	//} `json:"exif"`
-	//CollectionFlag interface{} `json:"collectionFlag"`
-	//TreeInfo       interface{} `json:"treeInfo"`
-	//IsShared       bool        `json:"isShared"`
-	//ETagOprType    int         `json:"ETagOprType"`
 }
 
 type GetDiskResp struct {
@@ -153,42 +85,18 @@ type InterLayerUploadResult struct {
 
 type CloudContent struct {
 	ContentID string `json:"contentID"`
-	//Modifier         string      `json:"modifier"`
-	//Nickname         string      `json:"nickname"`
-	//CloudNickName    string      `json:"cloudNickName"`
 	ContentName string `json:"contentName"`
-	//ContentType      int         `json:"contentType"`
-	//ContentSuffix    string      `json:"contentSuffix"`
 	ContentSize int64 `json:"contentSize"`
-	//ContentDesc      string      `json:"contentDesc"`
 	CreateTime string `json:"createTime"`
-	//Shottime         interface{} `json:"shottime"`
 	LastUpdateTime string `json:"lastUpdateTime"`
 	ThumbnailURL   string `json:"thumbnailURL"`
-	//MidthumbnailURL  string      `json:"midthumbnailURL"`
-	//BigthumbnailURL  string      `json:"bigthumbnailURL"`
-	//PresentURL       string      `json:"presentURL"`
-	//PresentLURL      string      `json:"presentLURL"`
-	//PresentHURL      string      `json:"presentHURL"`
-	//ParentCatalogID  string      `json:"parentCatalogID"`
-	//Uploader         string      `json:"uploader"`
-	//UploaderNickName string      `json:"uploaderNickName"`
-	//TreeInfo         interface{} `json:"treeInfo"`
-	//UpdateTime       interface{} `json:"updateTime"`
-	//ExtInfo          struct {
-	//	Uploader string `json:"uploader"`
-	//} `json:"extInfo"`
-	//EtagOprType interface{} `json:"etagOprType"`
 }
 
 type CloudCatalog struct {
 	CatalogID   string `json:"catalogID"`
 	CatalogName string `json:"catalogName"`
-	//CloudID         string `json:"cloudID"`
 	CreateTime     string `json:"createTime"`
 	LastUpdateTime string `json:"lastUpdateTime"`
-	//Creator         string `json:"creator"`
-	//CreatorNickname string `json:"creatorNickname"`
 }
 
 type QueryContentListResp struct {
@@ -214,15 +122,15 @@ type QueryGroupContentListResp struct {
 			ResultDesc string `json:"resultDesc"`
 		} `json:"result"`
 		GetGroupContentResult struct {
-			ParentCatalogID string `json:"parentCatalogID"` // 根目录是"0"
+			ParentCatalogID string `json:"parentCatalogID"`
 			CatalogList     []struct {
 				Catalog
 				Path string `json:"path"`
 			} `json:"catalogList"`
 			ContentList []Content `json:"contentList"`
-			NodeCount   int       `json:"nodeCount"` // 文件+文件夹数量
-			CtlgCnt     int       `json:"ctlgCnt"`   // 文件夹数量
-			ContCnt     int       `json:"contCnt"`   // 文件数量
+			NodeCount   int       `json:"nodeCount"`
+			CtlgCnt     int       `json:"ctlgCnt"`
+			ContCnt     int       `json:"contCnt"`
 		} `json:"getGroupContentResult"`
 	} `json:"data"`
 }
@@ -369,11 +277,6 @@ type DiskQuotaDetail struct {
 	Data struct {
 		FreeDiskSize int64 `json:"freeDiskSize"`
 		DiskSize     int64 `json:"diskSize"`
-		// QuotaList    []struct {
-		// 	DriveType int    `json:"driveType"`
-		// 	DriveName string `json:"driveName"`
-		// 	UsedSize  int64  `json:"usedSize"`
-		// } `json:"quotaList"`
 	} `json:"data"`
 }
 
@@ -434,4 +337,32 @@ type CreateBatchOprTaskResp struct {
 		ResultDesc string `json:"resultDesc"`
 	} `json:"result"`
 	TaskID string `json:"taskID"`
+}
+
+// ============================================================
+// ★ 新增：videoPreview/getPreviewInfo 响应结构
+// ============================================================
+
+type VideoPreviewResp struct {
+	BaseResp
+	Data struct {
+		FileID string `json:"fileId"`
+		Meta   struct {
+			Duration     string  `json:"duration"`
+			Width        int     `json:"width"`
+			Height       int     `json:"height"`
+			TakenAt      *string `json:"takenAt"`
+			LivePhoto    bool    `json:"livePhoto"`
+			Make         *string `json:"make"`
+			Model        *string `json:"model"`
+			DolbyVision  bool    `json:"dolbyVision"`
+			MultiChannel bool    `json:"multiChannel"`
+		} `json:"meta"`
+		PreviewInfo struct {
+			Status string `json:"status"`
+			URL    string `json:"url"`
+		} `json:"previewInfo"`
+		ErrorCode interface{} `json:"errorCode"`
+		Message   interface{} `json:"message"`
+	} `json:"data"`
 }
