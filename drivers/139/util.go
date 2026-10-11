@@ -1980,7 +1980,6 @@ func (d *Yun139) handleMetaGroupCopy(ctx context.Context, srcObj, dstDir model.O
 		},
 		"destCatalogID":    destCatalogID,
 		"destCloudID":      d.CloudID,
-		"destCloudID":      d.CloudID,
 		"sourceCatalogIDs": sourceCatalogIDs,
 		"sourceCloudID":    d.CloudID,
 		"sourceContentIDs": sourceContentIDs,
