@@ -979,6 +979,9 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 				if ThumbnailUrl == "" && len(Thumbnails) > 0 {
 					ThumbnailUrl = Thumbnails[len(Thumbnails)-1].Url
 				}
+				if d.Addition.ThumbnailProxyEnabled && d.Addition.ThumbnailProxyURL != "" && ThumbnailUrl != "" {
+					ThumbnailUrl = d.Addition.ThumbnailProxyURL + url.QueryEscape(ThumbnailUrl)
+				}
 				f = &model.ObjThumb{
 					Object: model.Object{
 						ID:       item.FileId,
