@@ -22,6 +22,9 @@ type Addition struct {
 	UseLargeThumbnail    bool   `json:"use_large_thumbnail" type:"bool" default:"false" help:"Enable to use large thumbnail for images"`
 	UseOldStreamUpload   bool   `json:"use_old_stream_upload" type:"bool" default:"false" help:"Enable to use old stream upload method (not support rapid upload)"`
 	ClientType           string `json:"client_type" type:"select" options:"web,pc" default:"web" help:"Client type reported to the personal cloud API. web (9) allows uploading files up to 50 GB; pc (13) raises the single file upload limit to 500 GB."`
+		// 新增：缩略图代理
+	ThumbnailProxyEnabled bool   `json:"thumbnail_proxy_enabled" type:"bool" default:"false" help:"启用缩略图代理：开启后，缩略图 URL 会替换为下方代理地址，解决 *.cmecloud.cn 直连不可达的问题"`
+	ThumbnailProxyURL     string `json:"thumbnail_proxy_url" type:"string" help:"缩略图代理地址前缀。代理服务需接收 ?url=原始缩略图URL 并转发，同时保持原始 Host 头以通过 AWS 签名校验。示例：https://your-proxy.com/proxy?url="`
 }
 
 var config = driver.Config{

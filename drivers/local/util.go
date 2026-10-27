@@ -179,7 +179,11 @@ func (d *Local) getThumb(ctx context.Context, file model.Obj) (*bytes.Buffer, *s
 	if err != nil {
 		return nil, nil, err
 	}
-	thumbImg := imaging.Resize(image, 144, 0, imaging.Lanczos)
+	thumbWidth := d.ThumbnailWidth
+	if thumbWidth <= 0 {
+		thumbWidth = 144 // 兜底默认值
+	}
+	thumbImg := imaging.Resize(image, thumbWidth, 0, imaging.Lanczos)
 	var buf bytes.Buffer
 	err = imaging.Encode(&buf, thumbImg, imaging.PNG)
 	if err != nil {

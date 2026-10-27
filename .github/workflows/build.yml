@@ -28,16 +28,15 @@ permissions:
   contents: write
 
 jobs:
-  # 媒体库相关的安全/配额/迁移测试单独跑一次，不必跟随 7 个构建目标重复执行
-  test:
-    name: Unit tests
+  build:
+    name: Build Windows amd64
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@v5
         with:
           go-version: "1.27.3"
 
@@ -66,8 +65,8 @@ jobs:
         uses: OpenListTeam/cgo-actions@v1.3.0
         with:
           targets: windows-amd64
-          # 关键优化：-s 去符号表，-w 去调试信息，-trimpath 去本地路径，-buildvcs=false 去 Git 信息
-          flags: '-ldflags=-s -w -trimpath -buildvcs=false'
+          # 只加链接器优化，不加 -trimpath/-buildvcs，避免 xgo 解析出错
+          flags: '-ldflags=-s -w'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
@@ -79,7 +78,7 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
           output: openlist-windows-amd64$ext
 
-      # 关键优化：用 UPX 再压一遍，能再砍掉 50% 以上
+      # 用 UPX 再压一遍，能再砍掉 50% 以上
       - name: Compress with UPX
         run: |
           sudo apt-get update

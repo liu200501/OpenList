@@ -117,10 +117,11 @@ func RemoveJSComment(data string) string {
 	return result.String()
 }
 
-var findAcwScV2Reg = regexp.MustCompile(`arg1='([0-9A-Z]+)'`)
+// ========== acw_sc__v2 相关 ==========
 
-// 在页面被过多访问或其他情况下，有时候会先返回一个加密的页面，其执行计算出一个acw_sc__v2后放入页面后再重新访问页面才能获得正常页面
-// 若该页面进行了js加密，则进行解密，计算acw_sc__v2，并加入cookie
+var findAcwScV2Reg = regexp.MustCompile(`arg1\s*=\s*['"]([0-9A-Fa-f]{40})['"]`)
+
+// CalcAcwScV2 根据 arg1 计算 acw_sc__v2
 func CalcAcwScV2(htmlContent string) (string, error) {
 	matches := findAcwScV2Reg.FindStringSubmatch(htmlContent)
 	if len(matches) != 2 {
@@ -128,42 +129,34 @@ func CalcAcwScV2(htmlContent string) (string, error) {
 	}
 	arg1 := matches[1]
 
-	mask := "3000176000856006061501533003690027800375"
-	result, err := hexXor(unbox(arg1), mask)
-	if err != nil {
-		return "", fmt.Errorf("hexXor 操作失败: %w", err)
+	pos := []int{
+		15, 35, 29, 24, 33, 16, 1, 38, 10, 9,
+		19, 31, 40, 27, 22, 23, 25, 13, 6, 11,
+		39, 18, 20, 8, 14, 21, 32, 26, 2, 30,
+		7, 4, 17, 5, 3, 28, 34, 37, 12, 36,
 	}
-
-	return result, nil
-}
-
-func unbox(hex string) string {
-	var box = []int{6, 28, 34, 31, 33, 18, 30, 23, 9, 8, 19, 38, 17, 24, 0, 5, 32, 21, 10, 22, 25, 14, 15, 3, 16, 27, 13, 35, 2, 29, 11, 26, 4, 36, 1, 39, 37, 7, 20, 12}
-	var newBox = make([]byte, len(hex))
-	for i, j := range box {
-		if len(newBox) > j {
-			newBox[j] = hex[i]
+	mixed := make([]byte, len(pos))
+	for i, p := range pos {
+		if p-1 >= len(arg1) {
+			return "", fmt.Errorf("位置索引越界: %d", p)
 		}
+		mixed[i] = arg1[p-1]
 	}
-	return string(newBox)
+
+	key := "3000176000856006061501533003690027800375"
+	result := make([]byte, len(mixed)/2)
+	for i := 0; i < len(result); i++ {
+		b1, err1 := strconv.ParseUint(string(mixed[i*2:i*2+2]), 16, 8)
+		b2, err2 := strconv.ParseUint(key[i*2:i*2+2], 16, 8)
+		if err1 != nil || err2 != nil {
+			return "", fmt.Errorf("hex 解析失败: %v, %v", err1, err2)
+		}
+		result[i] = byte(b1 ^ b2)
+	}
+	return hex.EncodeToString(result), nil
 }
 
-func hexXor(hex1, hex2 string) (string, error) {
-	bytes1, err := hex.DecodeString(hex1)
-	if err != nil {
-		return "", fmt.Errorf("解码 hex1 失败: %w", err)
-	}
-	bytes2, err := hex.DecodeString(hex2)
-	if err != nil {
-		return "", fmt.Errorf("解码 hex2 失败: %w", err)
-	}
-	minLength := min(len(bytes2), len(bytes1))
-	resultBytes := make([]byte, minLength)
-	for i := range minLength {
-		resultBytes[i] = bytes1[i] ^ bytes2[i]
-	}
-	return hex.EncodeToString(resultBytes), nil
-}
+// ========== JS 解析相关 ==========
 
 var findDataReg = regexp.MustCompile(`data[:\s]+({[^}]+})`)    // 查找json
 var findKVReg = regexp.MustCompile(`'(.+?)':('?([^' },]*)'?)`) // 拆分kv
