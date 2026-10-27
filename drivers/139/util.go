@@ -843,11 +843,24 @@ func unicode(str string) string {
 	return textUnquoted
 }
 
-// newRequest 用于 personal_new 类型的请求。
-// 改动说明：
-//   - mcloud-version 从 7.14.0 升到 7.18.0（与网页端 /hcy/file/getDownloadUrl 接口对齐）
-//   - 新增 Caller: web
-//   - 新增 X-Yun-Url-Type: 3
+// Client types reported in the X-Yun-Client-Info header. The web client is the
+// default with a 50 GB single file upload limit, while the PC client raises the
+// limit to 500 GB.
+const (
+	yunClientTypeWeb = "9"
+	yunClientTypePC  = "13"
+)
+
+// yunClientInfo returns the X-Yun-Client-Info header value for the configured
+// client_type addition. Anything other than pc falls back to the web client.
+func (d *Yun139) yunClientInfo() string {
+	clientType := yunClientTypeWeb
+	if d.ClientType == "pc" {
+		clientType = yunClientTypePC
+	}
+	return "||" + clientType + "|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||"
+}
+
 func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
 	req := base.RestyClient.R()
 	randStr := random.String(16)
@@ -873,8 +886,8 @@ func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback
 		"Mcloud-Client":        "10701",
 		"Mcloud-Route":         "001",
 		"Mcloud-Sign":          fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
-		"Mcloud-Version":       "7.18.0",
-		"x-DeviceInfo":         "||9|7.18.0|chrome|154.0.0.0|6d5774d51ad54602cdba20509757771b||windows 10||zh-CN|||",
+		"Mcloud-Version":       "7.14.0",
+		"x-DeviceInfo":         "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
 		"x-huawei-channelSrc":  "10000034",
 		"x-inner-ntwk":         "2",
 		"x-m4c-caller":         "PC",
@@ -883,9 +896,8 @@ func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback
 		"X-Yun-Api-Version":    "v1",
 		"X-Yun-App-Channel":    "10000034",
 		"X-Yun-Channel-Source": "10000034",
-		"X-Yun-Client-Info":    "||9|7.18.0|chrome|154.0.0.0|6d5774d51ad54602cdba20509757771b||windows 10||zh-CN|||dW5kZWZpbmVk||",
+		"X-Yun-Client-Info":    d.yunClientInfo(),
 		"X-Yun-Module-Type":    "100",
-		"X-Yun-Url-Type":       "3",
 		"X-Yun-Svc-Type":       "1",
 	})
 
@@ -1012,21 +1024,21 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 	return files, nil
 }
 
-// personalGetLink 获取下载链接。
-// 改动说明：
-//   - 改用网页端新接口 /hcy/file/getDownloadUrl，返回 *.eos.yun.139.com 地址
-//   - 该地址对国内联通/电信等网络可达性更好，避免 *.cmecloud.cn 直连超时
 func (d *Yun139) personalGetLink(fileId string) (string, error) {
 	data := base.Json{
 		"fileId": fileId,
 	}
-	// 改用新接口，域名 personal-kd-njs.yun.139.com
-	res, err := d.newRequest("https://personal-kd-njs.yun.139.com/hcy/file/getDownloadUrl",
-		http.MethodPost, func(req *resty.Request) {
-			req.SetBody(data)
-		}, nil)
+	res, err := d.personalPost("/file/getDownloadUrl",
+		data, nil)
 	if err != nil {
 		return "", err
+	}
+	cdnUrl := jsoniter.Get(res, "data", "cdnUrl").ToString()
+	if cdnUrl != "" {
+		cdnSwitch := jsoniter.Get(res, "data", "cdnSwitch").ToBool()
+		if cdnSwitch {
+			return cdnUrl, nil
+		}
 	}
 	return jsoniter.Get(res, "data", "url").ToString(), nil
 }
