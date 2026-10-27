@@ -38,22 +38,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.3"
+          go-version: "1.23.x"   # 改成实际存在的 Go 版本
 
       - name: Go test
         run: go test ./internal/db/... ./internal/transcode/... ./internal/media/...
-
-  build:
-    name: Build Windows amd64
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.3"
 
       - name: Setup web
         run: bash build.sh dev web
@@ -65,7 +53,6 @@ jobs:
         uses: OpenListTeam/cgo-actions@v1.3.0
         with:
           targets: windows-amd64
-          # 只加链接器优化，不加 -trimpath/-buildvcs，避免 xgo 解析出错
           flags: '-ldflags=-s -w'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -78,7 +65,6 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
           output: openlist-windows-amd64$ext
 
-      # 用 UPX 再压一遍，能再砍掉 50% 以上
       - name: Compress with UPX
         run: |
           sudo apt-get update
