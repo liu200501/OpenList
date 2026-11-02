@@ -51,7 +51,7 @@ jobs:
         with:
           targets: windows-amd64
           # 关键优化：-s 去符号表，-w 去调试信息，-trimpath 去本地路径，-buildvcs=false 去 Git 信息
-          flags: '-ldflags=-s -w -trimpath -buildvcs=false'
+          flags: '-ldflags=-s -w'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
