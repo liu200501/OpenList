@@ -173,12 +173,12 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 		svcType = "2"
 	}
 	req.SetHeaders(map[string]string{
-		"Accept":         "application/json, text/plain, */*",
-		"CMS-DEVICE":     "default",
-		"Authorization":  "Basic " + d.getAuthorization(),
-		"mcloud-channel": "1000101",
-		"mcloud-client":  "10701",
-		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
+		"Accept":                 "application/json, text/plain, */*",
+		"CMS-DEVICE":             "default",
+		"Authorization":          "Basic " + d.getAuthorization(),
+		"mcloud-channel":         "1000101",
+		"mcloud-client":          "10701",
+		"mcloud-sign":            fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
 		"mcloud-version":         "7.14.0",
 		"Origin":                 "https://yun.139.com",
 		"Referer":                "https://yun.139.com/w/",
@@ -245,12 +245,12 @@ func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error
 		svcType = "2"
 	}
 	req.SetHeaders(map[string]string{
-		"Accept":         "application/json, text/plain, */*",
-		"CMS-DEVICE":     "default",
-		"Authorization":  "Basic " + d.getAuthorization(),
-		"mcloud-channel": "1000101",
-		"mcloud-client":  "10701",
-		"mcloud-sign": fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
+		"Accept":                 "application/json, text/plain, */*",
+		"CMS-DEVICE":             "default",
+		"Authorization":          "Basic " + d.getAuthorization(),
+		"mcloud-channel":         "1000101",
+		"mcloud-client":          "10701",
+		"mcloud-sign":            fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
 		"mcloud-version":         "7.14.0",
 		"Origin":                 "https://yun.139.com",
 		"Referer":                "https://yun.139.com/w/",
@@ -849,6 +849,7 @@ func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback
 	}
 	req.SetHeaders(map[string]string{
 		"Accept":               "application/json, text/plain, */*",
+		"Accept-Language":      "zh-CN,zh;q=0.9",
 		"Authorization":        "Basic " + d.getAuthorization(),
 		"Caller":               "web",
 		"Cms-Device":           "default",
@@ -856,8 +857,11 @@ func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback
 		"Mcloud-Client":        "10701",
 		"Mcloud-Route":         "001",
 		"Mcloud-Sign":          fmt.Sprintf("%s,%s,%s", ts, randStr, sign),
-		"Mcloud-Version":       "7.14.0",
-		"x-DeviceInfo":         "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"Mcloud-Version":       "7.18.0",
+		"Origin":               "https://yun.139.com",
+		"Referer":              "https://yun.139.com/",
+		"User-Agent":           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+		"x-DeviceInfo":         "||9|7.18.0|chrome|154.0.0.0|6d5774d51ad54602cdba20509757771b||windows 10||zh-CN|||",
 		"x-huawei-channelSrc":  "10000034",
 		"x-inner-ntwk":         "2",
 		"x-m4c-caller":         "PC",
@@ -866,8 +870,9 @@ func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback
 		"X-Yun-Api-Version":    "v1",
 		"X-Yun-App-Channel":    "10000034",
 		"X-Yun-Channel-Source": "10000034",
-		"X-Yun-Client-Info":    "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
+		"X-Yun-Client-Info":    "||9|7.18.0|chrome|154.0.0.0|6d5774d51ad54602cdba20509757771b||windows 10||zh-CN|||dW5kZWZpbmVk||",
 		"X-Yun-Module-Type":    "100",
+		"X-Yun-Url-Type":       "3",
 		"X-Yun-Svc-Type":       "1",
 	})
 
@@ -993,23 +998,30 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 	return files, nil
 }
 
+// personalGetLink 获取下载链接
 func (d *Yun139) personalGetLink(fileId string) (string, error) {
 	data := base.Json{
 		"fileId": fileId,
 	}
-	res, err := d.personalPost("/file/getDownloadUrl",
-		data, nil)
+	res, err := d.newRequest("https://personal-kd-njs.yun.139.com/hcy/file/getDownloadUrl",
+		http.MethodPost, func(req *resty.Request) {
+			req.SetBody(data)
+		}, nil)
 	if err != nil {
 		return "", err
 	}
-	cdnUrl := jsoniter.Get(res, "data", "cdnUrl").ToString()
-	if cdnUrl != "" {
-		cdnSwitch := jsoniter.Get(res, "data", "cdnSwitch").ToBool()
-		if cdnSwitch {
-			return cdnUrl, nil
-		}
+
+	url := jsoniter.Get(res, "data", "url").ToString()
+
+	// ★ 核心修改：强制替换域名为能直连的 eos.yun.139.com
+	// 服务端有时会根据请求头下发 S3 直连节点 (cidc-rp-2006...)，导致国内网络超时。
+	// 这里强行将其替换为网页端下发的标准域名，以复用原有签名。
+	if url != "" {
+		url = strings.Replace(url, ".obs.dualstack.cidc-rp-2006.joint.cmecloud.cn", ".eos.yun.139.com", 1)
+		url = strings.Replace(url, ".cmecloud.cn", ".eos.yun.139.com", 1) // 兜底替换
 	}
-	return jsoniter.Get(res, "data", "url").ToString(), nil
+
+	return url, nil
 }
 
 func (d *Yun139) getAuthorization() string {
