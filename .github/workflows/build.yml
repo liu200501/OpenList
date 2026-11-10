@@ -53,6 +53,7 @@ jobs:
         uses: OpenListTeam/cgo-actions@v1.3.0
         with:
           targets: windows-amd64
+          # 关键优化：-s 去符号表，-w 去调试信息，-trimpath 去本地路径，-buildvcs=false 去 Git 信息
           flags: '-ldflags=-s -w'
           static-link-for-musl: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -63,13 +64,13 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          output: openlist-windows-amd64$ext
+          output: openlist-${{ inputs.tag }}$ext
 
       - name: Compress with UPX
         run: |
           sudo apt-get update
           sudo apt-get install -y upx-ucl
-          upx --best --lzma build/openlist-windows-amd64.exe
+          upx --best --lzma "build/openlist-${{ inputs.tag }}.exe"
           ls -lh build/
 
       - name: Upload artifact

@@ -394,7 +394,7 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 	)
 
 	sharePageData = RemoveNotes(sharePageData)
-	sharePageData = RemoveJSComment(sharePageData)
+	// sharePageData = RemoveJSComment(sharePageData)
 
 	if strings.Contains(sharePageData, "pwdload") || strings.Contains(sharePageData, "passwddiv") {
 		sharePageData, err := getJSFunctionByName(sharePageData, "down_p")
@@ -406,6 +406,11 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 			return nil, err
 		}
 		param["p"] = pwd
+
+		// 调试：打印进入正则匹配前的 sharePageData 全文
+		log.Infof("lanzou debug: sharePageData after getJSFunctionByName =>\n%s", sharePageData)
+		// 调试：单独确认目标 URL 是否存在
+		log.Infof("lanzou debug: contains apifile url = %v", strings.Contains(sharePageData, "https://apifile.woozooo.com/ajaxfile.php?file="))
 
 		// ========== 修改点 2：直接用完整 URL ==========
 		matches := findFileIDReg.FindStringSubmatch(sharePageData)
@@ -443,7 +448,7 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 			if err != nil {
 				return nil, err
 			}
-			ajaxUrl := d.ShareUrl + matches[0][1:len(matches[0])-1]
+			ajaxUrl := matches[1]
 			_, err = d.post(ajaxUrl, func(req *resty.Request) { req.SetFormData(param) }, &resp)
 		} else if fnUrl, fnForm, ferr := parseFnPage(nextPageData); ferr == nil {
 			// 2026-10 改版结构：/fn? 内页携带 apifile 绝对地址与签名参数
