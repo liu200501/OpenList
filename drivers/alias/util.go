@@ -27,6 +27,36 @@ func (d *Alias) listRoot(ctx context.Context, withDetails, refresh bool) []model
 	detailsChan := make(chan detailWithIndex, len(d.pathMap))
 	workerCount := 0
 	for _, k := range d.rootOrder {
+		v := d.pathMap[k]
+		// 单路径的 root 可能是一个“收藏”项，其背后是具体文件而非目录。
+		// 这里探测一次：若目标是文件，则直接作为文件对象列出，而不是伪装成文件夹，
+		// 这样在别名目录下点击即可直接访问/播放该文件。
+		if len(v) == 1 {
+			if fileObj, err := fs.Get(ctx, v[0], &fs.GetArgs{NoLog: true}); err == nil && !fileObj.IsDir() {
+				mask := model.GetObjMask(fileObj) &^ model.Temp
+				objRes := model.Object{
+					Name:     k,
+					Path:     "/" + k,
+					Size:     fileObj.GetSize(),
+					Modified: fileObj.ModTime(),
+					IsFolder: false,
+					HashInfo: fileObj.GetHash(),
+					Mask:     mask,
+				}
+				// 若后端驱动提供了缩略图，则带上，避免收藏目录里的文件没有缩略图。
+				var fileRet model.Obj = &objRes
+				if thumb, ok := model.GetThumb(fileObj); ok {
+					fileRet = &model.ObjThumb{
+						Object: objRes,
+						Thumbnail: model.Thumbnail{
+							Thumbnail: thumb,
+						},
+					}
+				}
+				objs = append(objs, fileRet)
+				continue
+			}
+		}
 		obj := &model.Object{
 			Name:     k,
 			Path:     "/" + k,
@@ -36,7 +66,6 @@ func (d *Alias) listRoot(ctx context.Context, withDetails, refresh bool) []model
 		}
 		idx := len(objs)
 		objs = append(objs, obj)
-		v := d.pathMap[k]
 		if !withDetails || len(v) != 1 {
 			continue
 		}
