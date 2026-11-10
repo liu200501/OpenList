@@ -185,6 +185,60 @@ func GetStorage(c *gin.Context) {
 // collecting favorites, so concurrent requests don't drop lines.
 var collectMutex sync.Mutex
 
+// favoriteRootPlaceholder 是收藏别名存储里的占位根条目。
+//
+// Alias 驱动在 paths 只有「一个不同显示名」时（Init 的 case 1），会把这条
+// 唯一记录当成整个挂载的根目录。收藏场景下这会导致「只收藏了一个文件」时，
+// /收藏 根目录指向该文件本身，列表页因此显示为空。
+//
+// 为解决该问题，收藏功能始终在 paths 中保留一条占位目录项，
+// 使不同显示名数量 >= 2，从而让 Alias 走 default 分支，把 /收藏 呈现为
+// 一个正常的只读目录，真实收藏项作为其子项展示。
+//
+// 占位项必须指向一个不存在的路径，而不是 "/"：Alias 的 listRoot 会把每个
+// 不同显示名都作为根目录下的条目列出，若占位项指向 "/"，会把整个根存储的
+// 内容（所有其它挂载点）都列进 /收藏。指向不存在的路径时，listRoot 探测失败，
+// 只会生成一个空的占位文件夹对象。
+//
+// 占位项在 ListCollects 中会被过滤，前端也会按名字隐藏，不会暴露给用户。
+const (
+	favoriteRootPlaceholderName = "__favorite_root__"
+	favoriteRootPlaceholderLine = favoriteRootPlaceholderName + ":/.openlist_favorite_placeholder"
+)
+
+// isFavoritePlaceholderLine 判断某一行是否为占位根条目。
+func isFavoritePlaceholderLine(line string) bool {
+	return strings.TrimSpace(line) == favoriteRootPlaceholderLine
+}
+
+// splitFavoriteLines 把 paths 拆成非空行，统一换行符并去掉首尾空白。
+func splitFavoriteLines(paths string) []string {
+	paths = strings.ReplaceAll(paths, "\r\n", "\n")
+	var lines []string
+	for _, line := range strings.Split(paths, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// ensureFavoritePlaceholder 保证给定的 paths 中始终存在占位根条目，
+// 并返回整理后的行列表（占位项固定在首位）。
+func ensureFavoritePlaceholder(lines []string) []string {
+	kept := make([]string, 0, len(lines)+1)
+	kept = append(kept, favoriteRootPlaceholderLine)
+	for _, line := range lines {
+		if isFavoritePlaceholderLine(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return kept
+}
+
 // CollectToFavorite appends a source path to the paths config of the Alias
 // storage mounted at req.MountPath (default "/收藏"), so the item is aggregated
 // under that mount point.
@@ -249,20 +303,18 @@ func CollectToFavorite(c *gin.Context) {
 	}
 
 	newLine := name + ":" + req.Path
-	paths := strings.ReplaceAll(addition.Paths, "\r\n", "\n")
-	for _, line := range strings.Split(paths, "\n") {
-		if strings.TrimSpace(line) == newLine {
+	lines := splitFavoriteLines(addition.Paths)
+	for _, line := range lines {
+		if line == newLine {
 			// already collected, idempotent success
 			common.SuccessResp(c)
 			return
 		}
 	}
 
-	if strings.TrimSpace(paths) == "" {
-		addition.Paths = newLine
-	} else {
-		addition.Paths = strings.TrimRight(paths, "\n") + "\n" + newLine
-	}
+	lines = append(lines, newLine)
+	// 始终保留占位根，避免只收藏一条时被 Alias 当成根目录。
+	addition.Paths = strings.Join(ensureFavoritePlaceholder(lines), "\n")
 
 	data, err := json.Marshal(addition)
 	if err != nil {
@@ -309,11 +361,10 @@ func parseFavoritePaths(additionStr string) []favoriteEntry {
 	if additionStr != "" {
 		_ = json.Unmarshal([]byte(additionStr), &addition)
 	}
-	paths := strings.ReplaceAll(addition.Paths, "\r\n", "\n")
 	var entries []favoriteEntry
-	for _, line := range strings.Split(paths, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, line := range splitFavoriteLines(addition.Paths) {
+		if isFavoritePlaceholderLine(line) {
+			// 占位根不属于真实收藏项，不暴露给前端。
 			continue
 		}
 		name, path, ok := strings.Cut(line, ":")
@@ -370,11 +421,10 @@ func RemoveFavorite(c *gin.Context) {
 		}
 	}
 
-	paths := strings.ReplaceAll(addition.Paths, "\r\n", "\n")
 	var kept []string
-	for _, line := range strings.Split(paths, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+	for _, trimmed := range splitFavoriteLines(addition.Paths) {
+		if isFavoritePlaceholderLine(trimmed) {
+			// 占位根始终保留，最后统一补回。
 			continue
 		}
 		_, p, ok := strings.Cut(trimmed, ":")
@@ -387,7 +437,8 @@ func RemoveFavorite(c *gin.Context) {
 		}
 		kept = append(kept, trimmed)
 	}
-	addition.Paths = strings.Join(kept, "\n")
+	// 即使收藏清空也保留占位根，保持 /收藏 目录结构稳定。
+	addition.Paths = strings.Join(ensureFavoritePlaceholder(kept), "\n")
 
 	data, err := json.Marshal(addition)
 	if err != nil {
