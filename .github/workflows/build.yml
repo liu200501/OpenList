@@ -38,7 +38,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.1"
+          go-version: "1.23.x"   # 改成实际存在的 Go 版本
+
+      - name: Go test
+        run: go test ./internal/db/... ./internal/transcode/... ./internal/media/...
 
       - name: Setup web
         run: bash build.sh dev web
@@ -63,7 +66,6 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
           output: openlist-${{ inputs.tag }}$ext
 
-      # 关键优化：用 UPX 再压一遍，能再砍掉 50% 以上
       - name: Compress with UPX
         run: |
           sudo apt-get update

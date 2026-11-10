@@ -831,6 +831,30 @@ func unicode(str string) string {
 	return textUnquoted
 }
 
+// Client types reported in the X-Yun-Client-Info header. The web client is the
+// default with a 50 GB single file upload limit, while the PC client raises the
+// limit to 500 GB.
+const (
+	yunClientTypeWeb = "9"
+	yunClientTypePC  = "13"
+)
+
+// yunClientInfo returns the X-Yun-Client-Info header value for the configured
+// client_type addition. Anything other than pc falls back to the web client.
+func (d *Yun139) yunClientInfo() string {
+	clientType := yunClientTypeWeb
+	if d.ClientType == "pc" {
+		clientType = yunClientTypePC
+	}
+	return "||" + clientType + "|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||"
+}
+
+// newRequest 用于 personal_new 类型的请求。
+// 改动说明：
+//   - Mcloud-Version 从 7.14.0 升到 7.18.0
+//   - 新增 Caller: web
+//   - 新增 X-Yun-Url-Type: 3
+//   - x-DeviceInfo / X-Yun-Client-Info 版本号同步升到 7.18.0
 func (d *Yun139) newRequest(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
 	req := base.RestyClient.R()
 	randStr := random.String(16)
@@ -977,6 +1001,9 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 				if ThumbnailUrl == "" && len(Thumbnails) > 0 {
 					ThumbnailUrl = Thumbnails[len(Thumbnails)-1].Url
 				}
+				if d.Addition.ThumbnailProxyEnabled && d.Addition.ThumbnailProxyURL != "" && ThumbnailUrl != "" {
+					ThumbnailUrl = d.Addition.ThumbnailProxyURL + url.QueryEscape(ThumbnailUrl)
+				}
 				f = &model.ObjThumb{
 					Object: model.Object{
 						ID:       item.FileId,
@@ -998,7 +1025,10 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 	return files, nil
 }
 
-// personalGetLink 获取下载链接
+// personalGetLink 获取下载链接。
+// 改动说明：
+//   - 改用网页端新接口 /hcy/file/getDownloadUrl，返回 *.eos.yun.139.com 地址
+//   - 该地址对国内联通/电信等网络可达性更好，避免 *.cmecloud.cn 直连超时
 func (d *Yun139) personalGetLink(fileId string) (string, error) {
 	data := base.Json{
 		"fileId": fileId,
@@ -2048,7 +2078,7 @@ func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
 }
 
 // ============================================================
-// ★ 新增：视频时长获取与缓存（含持久化）
+// ★ 视频时长获取与缓存（含持久化）
 // ============================================================
 
 var videoExts = map[string]bool{
@@ -2084,7 +2114,6 @@ func (d *Yun139) fetchVideoDuration(fileID string) float64 {
 	// 2) 读进程内缓存
 	if v, ok := durationCache.Load(fileID); ok {
 		if f, ok := v.(float64); ok && f > 0 {
-			// 顺便写入持久化缓存
 			setPersistDuration(fileID, f)
 			return f
 		}
