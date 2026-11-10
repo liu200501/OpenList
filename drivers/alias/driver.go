@@ -30,6 +30,22 @@ type Alias struct {
 	root      model.Obj
 }
 
+// objWithProvider 包装一个对象并附带后端 provider 名称。
+// 内嵌 model.Obj 接口并通过 Unwrap 暴露底层对象，
+// 使 model.GetThumb 等辅助函数能够穿透包装取到缩略图。
+type objWithProvider struct {
+	model.Obj
+	provider string
+}
+
+func (o *objWithProvider) Unwrap() model.Obj {
+	return o.Obj
+}
+
+func (o *objWithProvider) GetProvider() string {
+	return o.provider
+}
+
 func (d *Alias) Config() driver.Config {
 	return config
 }
@@ -136,14 +152,22 @@ func (d *Alias) Get(ctx context.Context, path string) (model.Obj, error) {
 			HashInfo: obj.GetHash(),
 			Mask:     mask,
 		}
-		obj = &ret
+		// 透传底层存储的缩略图，否则收藏等别名目录中的图片/视频会丢失缩略图。
+		var newObj model.Obj = &ret
+		if thumb, ok := model.GetThumb(obj); ok {
+			newObj = &model.ObjThumb{
+				Object: ret,
+				Thumbnail: model.Thumbnail{
+					Thumbnail: thumb,
+				},
+			}
+		}
+		obj = newObj
 		if d.ProviderPassThrough && !obj.IsDir() {
 			if storage, err := fs.GetStorage(rawPath, &fs.GetStoragesArgs{}); err == nil {
-				obj = &model.ObjectProvider{
-					Object: ret,
-					Provider: model.Provider{
-						Provider: storage.Config().Name,
-					},
+				obj = &objWithProvider{
+					Obj:      newObj,
+					provider: storage.Config().Name,
 				}
 			}
 		}

@@ -32,7 +32,9 @@ func (d *Alias) listRoot(ctx context.Context, withDetails, refresh bool) []model
 		// 这里探测一次：若目标是文件，则直接作为文件对象列出，而不是伪装成文件夹，
 		// 这样在别名目录下点击即可直接访问/播放该文件。
 		if len(v) == 1 {
-			if fileObj, err := fs.Get(ctx, v[0], &fs.GetArgs{NoLog: true}); err == nil && !fileObj.IsDir() {
+			fileObj, err := fs.Get(ctx, v[0], &fs.GetArgs{NoLog: true})
+			log.Infof("[alias][listRoot] name=%q path=%q len(v)=%d err=%v isDir=%v", k, v[0], len(v), err, err == nil && fileObj.IsDir())
+			if err == nil && !fileObj.IsDir() {
 				mask := model.GetObjMask(fileObj) &^ model.Temp
 				objRes := model.Object{
 					Name:     k,
@@ -45,7 +47,9 @@ func (d *Alias) listRoot(ctx context.Context, withDetails, refresh bool) []model
 				}
 				// 若后端驱动提供了缩略图，则带上，避免收藏目录里的文件没有缩略图。
 				var fileRet model.Obj = &objRes
-				if thumb, ok := model.GetThumb(fileObj); ok {
+				thumb, ok := model.GetThumb(fileObj)
+				log.Infof("[alias][listRoot] thumb-check name=%q ok=%v thumbLen=%d", k, ok, len(thumb))
+				if ok {
 					fileRet = &model.ObjThumb{
 						Object: objRes,
 						Thumbnail: model.Thumbnail{
@@ -57,6 +61,7 @@ func (d *Alias) listRoot(ctx context.Context, withDetails, refresh bool) []model
 				continue
 			}
 		}
+		log.Infof("[alias][listRoot] fallback-folder name=%q len(v)=%d", k, len(v))
 		obj := &model.Object{
 			Name:     k,
 			Path:     "/" + k,

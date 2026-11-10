@@ -198,40 +198,26 @@ func (d *Local) FileInfoToObj(ctx context.Context, f fs.FileInfo, reqPath string
 }
 
 func (d *Local) Get(ctx context.Context, path string) (model.Obj, error) {
-	path = filepath.Join(d.GetRootPath(), path)
-	f, err := os.Stat(path)
+	// reqPath 是相对存储根的请求路径，用于生成缩略图 URL；
+	// fullPath 是实际文件系统路径。
+	reqPath := path
+	fullPath := filepath.Join(d.GetRootPath(), path)
+	f, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errs.ObjectNotFound
 		}
 		return nil, err
 	}
-	isFolder := f.IsDir() || isSymlinkDir(f, path)
-	size := f.Size()
-	if isFolder {
-		node, ok := d.directoryMap.Get(path)
-		if ok {
-			size = node.fileSum + node.directorySum
-		}
-	} else {
-		size = f.Size()
+	// 复用 FileInfoToObj，保证 Get 与 List 返回一致的对象类型（含缩略图）。
+	// reqPath 是存储内相对路径，生成 /d/ 缩略图 URL 需要补上挂载路径前缀。
+	parentPath := filepath.Dir(fullPath)
+	mountPath := d.GetStorage().MountPath
+	if mountPath == "" {
+		mountPath = "/"
 	}
-	var ctime time.Time
-	t, err := times.Stat(path)
-	if err == nil {
-		if t.HasBirthTime() {
-			ctime = t.BirthTime()
-		}
-	}
-	file := model.Object{
-		Path:     path,
-		Name:     f.Name(),
-		Modified: f.ModTime(),
-		Ctime:    ctime,
-		Size:     size,
-		IsFolder: isFolder,
-	}
-	return &file, nil
+	reqDir := utils.GetFullPath(mountPath, stdpath.Dir(reqPath))
+	return d.FileInfoToObj(ctx, f, reqDir, parentPath), nil
 }
 
 func (d *Local) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
