@@ -89,7 +89,7 @@ func (d *LanZou) _post(url string, callback base.ReqCallback, resp interface{}, 
 		if info == "" {
 			info = utils.Json.Get(data, "info").ToString()
 		}
-		return data, fmt.Errorf(info)
+		return data, fmt.Errorf("%s", info)
 	}
 }
 
@@ -285,6 +285,7 @@ var findDownPageParamReg = regexp.MustCompile(`<iframe.*?src="(.+?)"`)
 
 // ========== 修改点 1：正则匹配完整 URL ==========
 var findFileIDReg = regexp.MustCompile(`(https?://[^"'\s]+/ajax(?:file|m)\.php\?file=\d+)`)
+
 
 // 2026-10 改版：文件页将下载参数移入 /fn? 内页，接口变为 apifile 绝对地址并携带签名
 var (
