@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
@@ -357,10 +358,31 @@ func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileSt
 		return err
 	}
 
-	// Encrypt the data into wrappedIn
-	wrappedIn, err := d.cipher.EncryptData(streamer)
-	if err != nil {
-		return fmt.Errorf("failed to EncryptData: %w", err)
+	encName := d.cipher.EncryptFileName(streamer.GetName())
+	encSize := d.cipher.EncryptedSize(streamer.GetSize())
+
+	var (
+		reader  io.Reader
+		cleanup func(success bool)
+	)
+	// 底层支持断点续传（如 139 的分片会话）、用户没关开关、且当前是可暂停的上传任务时，
+	// 必须喂同一份密文：rclone crypt 每个文件随机 nonce，重新加密会得到
+	// 完全不同的字节，已上传的分片就全废了。
+	if d.resumableWith(remoteStorage) && ctx.Value(conf.KeepStreamKey) != nil {
+		cached, cachedSize, cl, cacheErr := d.stableCiphertext(
+			ctx, remoteStorage.GetStorage().ID, remoteActualPath, encName, streamer, up)
+		if cacheErr != nil {
+			return cacheErr
+		}
+		reader, cleanup = cached, cl
+		if cachedSize > 0 {
+			encSize = cachedSize
+		}
+	} else {
+		reader, err = d.cipher.EncryptData(streamer)
+		if err != nil {
+			return fmt.Errorf("failed to EncryptData: %w", err)
+		}
 	}
 
 	// doesn't support seekableStream, since rapid-upload is not working for encrypted data
@@ -368,17 +390,22 @@ func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileSt
 		Obj: &model.Object{
 			ID:       streamer.GetID(),
 			Path:     streamer.GetPath(),
-			Name:     d.cipher.EncryptFileName(streamer.GetName()),
-			Size:     d.cipher.EncryptedSize(streamer.GetSize()),
+			Name:     encName,
+			Size:     encSize,
 			Modified: streamer.ModTime(),
 			IsFolder: streamer.IsDir(),
 		},
-		Reader:            wrappedIn,
+		Reader:            reader,
 		Mimetype:          "application/octet-stream",
 		ForceStreamUpload: true,
 		Exist:             streamer.GetExist(),
 	}
-	return op.Put(ctx, remoteStorage, remoteActualPath, streamOut, up)
+	err = op.Put(ctx, remoteStorage, remoteActualPath, streamOut, up)
+	if cleanup != nil {
+		// 上传成功就释放密文缓存；失败则保留，供下次续传复用同一份字节
+		cleanup(err == nil)
+	}
+	return err
 }
 
 func (d *Crypt) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
@@ -393,6 +420,24 @@ func (d *Crypt) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 	return &model.StorageDetails{
 		DiskUsage: remoteDetails.DiskUsage,
 	}, nil
+}
+
+// resumableWith 判断「经此 crypt 存储上传到 remote 能不能暂停/继续」。
+func (d *Crypt) resumableWith(remote driver.Driver) bool {
+	if d.DisableResumable || remote == nil {
+		return false
+	}
+	r, ok := remote.(driver.Resumable)
+	return ok && r.Resumable()
+}
+
+// Resumable 实现 driver.Resumable，供上传任务决定要不要给用户「暂停」按钮。
+func (d *Crypt) Resumable() bool {
+	remote, _, err := op.GetStorageAndActualPath(d.RemotePath)
+	if err != nil {
+		return false
+	}
+	return d.resumableWith(remote)
 }
 
 var _ driver.Driver = (*Crypt)(nil)

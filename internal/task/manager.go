@@ -19,4 +19,8 @@ type Manager[T tache.Task] interface {
 	RemoveByCondition(condition func(task T) bool)
 	Retry(id string)
 	RetryAllFailed()
+	// PauseTask stops a running task but keeps it resumable.
+	PauseTask(id string)
+	// ResumeTask puts a paused task back into the queue.
+	ResumeTask(id string)
 }

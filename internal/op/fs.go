@@ -617,6 +617,11 @@ func Remove(ctx context.Context, storage driver.Driver, path string) error {
 
 func Put(ctx context.Context, storage driver.Driver, dstDirPath string, file model.FileStreamer, up driver.UpdateProgress) error {
 	defer func() {
+		// 可暂停的上传任务自己管理流的生命周期：暂停时必须保留已缓存的源数据，
+		// 否则恢复后无米下锅。真正结束时由任务显式 Close。
+		if ctx.Value(conf.KeepStreamKey) != nil {
+			return
+		}
 		if err := file.Close(); err != nil {
 			log.Errorf("failed to close file streamer, %v", err)
 		}

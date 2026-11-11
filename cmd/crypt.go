@@ -103,7 +103,9 @@ func (o *options) cryptFileDir() {
 		"suffix":                    o.suffix,
 		"pass_bad_blocks":           "",
 	}
-	log.Infof("config:%v", config)
+	// 不要把 password / salt 打进日志：命令行工具的输出会留在终端和日志里
+	log.Infof("config:filename_encryption=%s,directory_name_encryption=%s,filename_encoding=%s,suffix=%s",
+		o.filenameEncryption, o.dirnameEncryption, o.filenameEncode, o.suffix)
 	cipher, err := rcCrypt.NewCipher(config)
 	if err != nil {
 		log.Fatalf("create cipher failed,err:%v", err)

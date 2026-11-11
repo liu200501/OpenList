@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdpath "path"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -17,6 +18,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/task_group"
 	"github.com/OpenListTeam/tache"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 )
 
 type UploadTask struct {
@@ -24,6 +26,10 @@ type UploadTask struct {
 	storage          driver.Driver
 	dstDirActualPath string
 	file             model.FileStreamer
+
+	// runCount 记录执行次数。首次执行时源流还没被消费，不需要回绕；
+	// 之后（暂停恢复 / 重试）必须先回到第 0 字节，驱动层才能靠会话跳过已传分片。
+	runCount atomic.Int32
 }
 
 func (t *UploadTask) GetName() string {
@@ -38,15 +44,53 @@ func (t *UploadTask) Run() error {
 	t.ClearEndTime()
 	t.SetStartTime(time.Now())
 	defer func() { t.SetEndTime(time.Now()) }()
-	return op.Put(context.WithValue(t.Ctx(), conf.SkipHookKey, struct{}{}), t.storage, t.dstDirActualPath, t.file, t.SetProgress)
+	// 断点续传：上一次尝试已经把源流读到中途甚至读完，重试前先回绕到起点，
+	// 驱动层再根据会话跳过已经传成功的分片。
+	if t.runCount.Add(1) > 1 {
+		if r, ok := any(t.file).(interface{ Rewind() error }); ok {
+			if err := r.Rewind(); err != nil {
+				return errors.Wrapf(err, "upload stream is not reusable (cached data has been released), please upload again")
+			}
+		}
+	}
+	ctx := context.WithValue(t.Ctx(), conf.SkipHookKey, struct{}{})
+	if t.Pausable() {
+		// 由任务自己关闭源流：op.Put 正常结束时会 Close，暂停场景下那会把
+		// 已缓存的源数据删掉，恢复后就无法重放了。
+		ctx = context.WithValue(ctx, conf.KeepStreamKey, struct{}{})
+	}
+	return op.Put(ctx, t.storage, t.dstDirActualPath, t.file, t.SetProgress)
+}
+
+// Pausable 判断这个上传任务能不能暂停：只有底层存储声明支持续传（如 139），
+// 或者 crypt 存储没关掉续传开关时才行。不支持时前端不会出现「暂停」按钮。
+func (t *UploadTask) Pausable() bool {
+	if r, ok := t.storage.(driver.Resumable); ok {
+		return r.Resumable()
+	}
+	return false
+}
+
+// closeStream 释放源流缓存，只在任务真正结束时调用（成功 / 失败 / 取消）。
+func (t *UploadTask) closeStream() {
+	if t.file == nil {
+		return
+	}
+	if err := t.file.Close(); err != nil {
+		log.Errorf("failed to close upload stream of [%s], %v", t.GetName(), err)
+	}
 }
 
 func (t *UploadTask) OnSucceeded() {
 	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), stdpath.Join(t.storage.GetStorage().MountPath, t.dstDirActualPath), true)
+	t.closeStream()
 }
 
 func (t *UploadTask) OnFailed() {
+	// 暂停不会走到这里（worker 保留了 StatePaused），所以能到 OnFailed
+	// 就是真的结束或取消了，可以安全释放源流缓存。
 	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), stdpath.Join(t.storage.GetStorage().MountPath, t.dstDirActualPath), false)
+	t.closeStream()
 }
 
 func (t *UploadTask) SetRetry(retry int, maxRetry int) {

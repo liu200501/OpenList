@@ -77,6 +77,14 @@ type Remove interface {
 	Remove(ctx context.Context, obj model.Obj) error
 }
 
+// Resumable marks a storage whose Put can continue from where an interrupted
+// attempt stopped (e.g. 139's session based chunk upload). An upper layer such
+// as crypt uses it to decide whether the bytes it feeds in must stay identical
+// across retries.
+type Resumable interface {
+	Resumable() bool
+}
+
 type Put interface {
 	// Put a file (provided as a FileStreamer) into the driver
 	// Besides the most basic upload functionality, the following features also need to be implemented:

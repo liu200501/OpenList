@@ -330,3 +330,6 @@ replace github.com/cronokirby/saferith => github.com/Da3zKi7/saferith v0.33.0-fi
 // replace github.com/OpenListTeam/115-sdk-go => ../../OpenListTeam/115-sdk-go
 
 replace github.com/KarpelesLab/reflink => github.com/OpenListTeam/reflink v0.0.0-20260701021214-78760eaeafef
+
+// 本地 fork：增加 StatePaused / Pause / Resume，供上传任务暂停使用
+replace github.com/OpenListTeam/tache => ./thirdparty/tache

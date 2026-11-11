@@ -28,6 +28,8 @@ type TaskInfo struct {
 	EndTime     *time.Time  `json:"end_time"`
 	TotalBytes  int64       `json:"total_bytes"`
 	Error       string      `json:"error"`
+	// Pausable 表示该任务所在存储支持暂停/继续，前端据此决定是否显示按钮
+	Pausable bool `json:"pausable"`
 }
 
 func getTaskInfo[T task.TaskExtensionInfo](task T) TaskInfo {
@@ -46,6 +48,11 @@ func getTaskInfo[T task.TaskExtensionInfo](task T) TaskInfo {
 		creatorName = task.GetCreator().Username
 		creatorRole = task.GetCreator().Role
 	}
+	// 任务自己知道所在存储能不能续传（crypt 还受存储开关控制）
+	pausable := false
+	if p, ok := any(task).(interface{ Pausable() bool }); ok {
+		pausable = p.Pausable()
+	}
 	return TaskInfo{
 		ID:          task.GetID(),
 		Name:        task.GetName(),
@@ -58,6 +65,7 @@ func getTaskInfo[T task.TaskExtensionInfo](task T) TaskInfo {
 		EndTime:     task.GetEndTime(),
 		TotalBytes:  task.GetTotalBytes(),
 		Error:       errMsg,
+		Pausable:    pausable,
 	}
 }
 
@@ -124,7 +132,7 @@ func getBatchHandler[T task.TaskExtensionInfo](manager task.Manager[T], callback
 	}
 }
 
-func taskRoute[T task.TaskExtensionInfo](g *gin.RouterGroup, manager task.Manager[T]) {
+func taskRoute[T task.TaskExtensionInfo](g *gin.RouterGroup, manager task.Manager[T], pausable bool) {
 	g.GET("/undone", func(c *gin.Context) {
 		isAdmin, uid, ok := getUserInfo(c)
 		if !ok {
@@ -136,7 +144,8 @@ func taskRoute[T task.TaskExtensionInfo](g *gin.RouterGroup, manager task.Manage
 			// avoid directly passing the user object into the function to reduce closure size
 			return (isAdmin || uid == task.GetCreator().ID) &&
 				argsContains(task.GetState(), tache.StatePending, tache.StateRunning, tache.StateCanceling,
-					tache.StateErrored, tache.StateFailing, tache.StateWaitingRetry, tache.StateBeforeRetry)
+					tache.StateErrored, tache.StateFailing, tache.StateWaitingRetry, tache.StateBeforeRetry,
+					tache.StatePaused)
 		})))
 	})
 	g.GET("/done", func(c *gin.Context) {
@@ -200,8 +209,7 @@ func taskRoute[T task.TaskExtensionInfo](g *gin.RouterGroup, manager task.Manage
 		})
 		common.SuccessResp(c)
 	})
-	g.POST("/retry_failed", func(c *gin.Context) {
-		isAdmin, uid, ok := getUserInfo(c)
+	g.POST("/retry_failed", func(c *gin.Context) {		isAdmin, uid, ok := getUserInfo(c)
 		if !ok {
 			// if there is no bug, here is unreachable
 			common.ErrorStrResp(c, "user invalid", 401)
@@ -215,14 +223,24 @@ func taskRoute[T task.TaskExtensionInfo](g *gin.RouterGroup, manager task.Manage
 		}
 		common.SuccessResp(c)
 	})
+	if pausable {
+		g.POST("/pause", getTargetedHandler(manager, func(c *gin.Context, task T) {
+			manager.PauseTask(task.GetID())
+			common.SuccessResp(c)
+		}))
+		g.POST("/resume", getTargetedHandler(manager, func(c *gin.Context, task T) {
+			manager.ResumeTask(task.GetID())
+			common.SuccessResp(c)
+		}))
+	}
 }
 
 func SetupTaskRoute(g *gin.RouterGroup) {
-	taskRoute(g.Group("/upload"), fs.UploadTaskManager)
-	taskRoute(g.Group("/copy"), fs.CopyTaskManager)
-	taskRoute(g.Group("/move"), fs.MoveTaskManager)
-	taskRoute(g.Group("/offline_download"), tool.DownloadTaskManager)
-	taskRoute(g.Group("/offline_download_transfer"), tool.TransferTaskManager)
-	taskRoute(g.Group("/decompress"), fs.ArchiveDownloadTaskManager)
-	taskRoute(g.Group("/decompress_upload"), fs.ArchiveContentUploadTaskManager)
+	taskRoute(g.Group("/upload"), fs.UploadTaskManager, true)
+	taskRoute(g.Group("/copy"), fs.CopyTaskManager, false)
+	taskRoute(g.Group("/move"), fs.MoveTaskManager, false)
+	taskRoute(g.Group("/offline_download"), tool.DownloadTaskManager, false)
+	taskRoute(g.Group("/offline_download_transfer"), tool.TransferTaskManager, false)
+	taskRoute(g.Group("/decompress"), fs.ArchiveDownloadTaskManager, false)
+	taskRoute(g.Group("/decompress_upload"), fs.ArchiveContentUploadTaskManager, false)
 }

@@ -17,6 +17,10 @@ type Addition struct {
 
 	Thumbnail bool `json:"thumbnail" required:"true" default:"false" help:"enable thumbnail which pre-generated under .thumbnails folder"`
 
+	// 用「禁用」而不是「启用」：老配置的 addition JSON 里没有这个 key，
+	// 反序列化后为 false，正好保持原有的「支持暂停」行为。
+	DisableResumable bool `json:"disable_resumable_upload" default:"false" help:"turn off pause/resume for uploads: no ciphertext is pre-written to the temp dir, and an interrupted upload has to restart from the beginning"`
+
 	ShowHidden bool `json:"show_hidden"  default:"true" required:"false" help:"show hidden directories and files"`
 }
 
