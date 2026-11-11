@@ -727,6 +727,16 @@ func (d *Yun139) getPartSize(size int64) int64 {
 	return 100 * utils.MB
 }
 
+// Resumable 实现 driver.Resumable：新上传 API（personal_new / group / family）
+// 走分片会话，中断后能从 nextPart 继续；旧流上传方式没有会话概念。
+func (d *Yun139) Resumable() bool {
+	if d.isShare() {
+		return false
+	}
+	return d.Addition.Type == MetaPersonalNew ||
+		((d.isGroup() || d.isFamily()) && !d.UseOldStreamUpload)
+}
+
 func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
 	if d.isShare() {
 		return errs.NotImplement
@@ -748,19 +758,36 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		}
 
 		var err error
-		fullHash := stream.GetHash().GetHash(utils.SHA256)
-		if len(fullHash) != utils.SHA256.Width {
-			_, fullHash, err = streamPkg.CacheFullAndHash(stream, &up, utils.SHA256)
-			if err != nil {
-				return err
-			}
-		}
 
 		size := stream.GetSize()
 		partSize := d.getPartSize(size)
 		part := int64(1)
 		if size > partSize {
 			part = (size + partSize - 1) / partSize
+		}
+
+		// 顺带清理过期会话，避免长驻进程里无限堆积
+		gcExpiredUploadSessions()
+
+		// 断点续传：命中上次中断留下的会话时，不重新 create，也不重新算 SHA256。
+		// key 里的 size 是加密后的大小（crypt 场景），所以加密文件的偏移和分片天然对齐。
+		sessionKey := resumeSessionKey(d.GetStorage().ID, dstDir.GetID(), stream.GetName(), size)
+		sess, resumed := getUploadSession(sessionKey, size, partSize)
+		if resumed {
+			log.Infof("[139] resume upload [%s] from part %d/%d", stream.GetName(), sess.nextPart+1, part)
+		}
+
+		var fullHash string
+		if resumed {
+			fullHash = sess.contentHash
+		} else {
+			fullHash = stream.GetHash().GetHash(utils.SHA256)
+			if len(fullHash) != utils.SHA256.Width {
+				_, fullHash, err = streamPkg.CacheFullAndHash(stream, &up, utils.SHA256)
+				if err != nil {
+					return err
+				}
+			}
 		}
 
 		// 生成所有 partInfos
@@ -816,23 +843,48 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			data["seqNo"] = random.String(32)
 		}
 		var resp PersonalUploadResp
-		_, err = d.newPost(createPath, data, &resp)
-		if err != nil {
-			return err
+		if resumed {
+			// 复用上次的 fileId/uploadId，跳过 create
+			resp.Data.FileId = sess.fileID
+			resp.Data.UploadId = sess.uploadID
+			resp.Data.FileName = stream.GetName()
+		} else {
+			_, err = d.newPost(createPath, data, &resp)
+			if err != nil {
+				return err
+			}
 		}
 
 		// 判断文件是否已存在
 		// resp.Data.Exist: true 已存在同名文件且校验相同，云端不会重复增加文件，无需手动处理冲突
 		if resp.Data.Exist {
+			dropUploadSession(sessionKey)
 			return nil
 		}
 
 		// 判断文件是否支持快传
 		// resp.Data.RapidUpload: true 支持快传，但此处直接检测是否返回分片的上传地址
 		// 快传的情况下同样需要手动处理冲突
-		if resp.Data.PartInfos != nil {
+		if !resumed && resp.Data.PartInfos == nil {
+			return nil
+		}
+		if !resumed {
+			// 新会话：记下 fileId/uploadId，后续中断时据此续传
+			sess = &uploadSession{
+				key:         sessionKey,
+				fileID:      resp.Data.FileId,
+				uploadID:    resp.Data.UploadId,
+				contentHash: fullHash,
+				size:        size,
+				partSize:    partSize,
+			}
+			saveUploadSession(sess)
+		}
+		{
 			// Progress
 			p := driver.NewProgress(size, up)
+			// 已传过的部分算进进度，避免续传时进度条从 0 重来
+			p.Done = sess.nextPart * partSize
 
 			rateLimited := driver.NewLimitedUploadStream(ctx, stream)
 			ss, err := streamPkg.NewStreamSectionReader(&streamPkg.FileStream{
@@ -844,32 +896,43 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 				return err
 			}
 
-			// 先上传前100个分片
-			err = d.uploadPersonalParts(ctx, partInfos, resp.Data.PartInfos, ss, p)
-			if err != nil {
-				return err
+			// 跳过已经成功上传的连续分片（SectionReader 只能顺序前进，这里是显式丢弃）
+			if sess.nextPart > 0 {
+				if err = ss.DiscardSection(0, sess.nextPart*partSize); err != nil {
+					// 源流回绕失败（例如没走 asTask、body 没缓存住），会话作废，下次从头来
+					dropUploadSession(sessionKey)
+					return fmt.Errorf("139: failed to skip %d uploaded parts: %w", sess.nextPart, err)
+				}
 			}
 
-			// 如果还有剩余分片，分批获取上传地址并上传
-			for i := 100; i < len(partInfos); i += 100 {
-				end := min(i+100, len(partInfos))
-				batchPartInfos := partInfos[i:end]
-				moredata := base.Json{
-					"fileId":    resp.Data.FileId,
-					"uploadId":  resp.Data.UploadId,
-					"partInfos": batchPartInfos,
-					"commonAccountInfo": base.Json{
-						"account":     d.getAccount(),
-						"accountType": 1,
-					},
+			onPartDone := func(partNumber int64) {
+				sess.nextPart = partNumber
+				saveUploadSession(sess)
+			}
+
+			for i := sess.nextPart; i < part; i += 100 {
+				end := min(i+100, part)
+				var urls []PersonalPartInfo
+				if i == 0 && len(resp.Data.PartInfos) > 0 {
+					// create 已经把前 100 个分片的上传地址返回了
+					urls = resp.Data.PartInfos
+				} else {
+					moredata := base.Json{
+						"fileId":    sess.fileID,
+						"uploadId":  sess.uploadID,
+						"partInfos": partInfos[i:end],
+						"commonAccountInfo": base.Json{
+							"account":     d.getAccount(),
+							"accountType": 1,
+						},
+					}
+					var moreresp PersonalUploadUrlResp
+					if _, err = d.newPost(getUploadUrlPath, moredata, &moreresp); err != nil {
+						return err
+					}
+					urls = moreresp.Data.PartInfos
 				}
-				var moreresp PersonalUploadUrlResp
-				_, err = d.newPost(getUploadUrlPath, moredata, &moreresp)
-				if err != nil {
-					return err
-				}
-				err = d.uploadPersonalParts(ctx, partInfos, moreresp.Data.PartInfos, ss, p)
-				if err != nil {
+				if err = d.uploadPersonalParts(ctx, partInfos, urls, ss, p, onPartDone); err != nil {
 					return err
 				}
 			}
@@ -878,8 +941,8 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			data = base.Json{
 				"contentHash":          fullHash,
 				"contentHashAlgorithm": "SHA256",
-				"fileId":               resp.Data.FileId,
-				"uploadId":             resp.Data.UploadId,
+				"fileId":               sess.fileID,
+				"uploadId":             sess.uploadID,
 			}
 			// 家庭云和共享群需要额外的参数
 			if d.isGroup() || d.isFamily() {
@@ -889,10 +952,12 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			if err != nil {
 				return err
 			}
+			// 分片全部落库，会话可以丢了
+			dropUploadSession(sessionKey)
 		}
 
-		// 处理冲突
-		if resp.Data.FileName != stream.GetName() {
+		// 处理冲突（续传时文件名在首次 create 时已经确定，不需要再处理）
+		if !resumed && resp.Data.FileName != stream.GetName() {
 			log.Debugf("[139] conflict detected: %s != %s", resp.Data.FileName, stream.GetName())
 			// 给服务器一定时间处理数据，避免无法刷新文件列表
 			time.Sleep(time.Millisecond * 500)

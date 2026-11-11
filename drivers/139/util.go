@@ -1089,7 +1089,7 @@ func (d *Yun139) getGroupCloudHost() string {
 	return d.GroupCloudHost
 }
 
-func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, uploadPartInfos []PersonalPartInfo, ss streamPkg.StreamSectionReader, p *driver.Progress) error {
+func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, uploadPartInfos []PersonalPartInfo, ss streamPkg.StreamSectionReader, p *driver.Progress, onPartDone func(partNumber int64)) error {
 	sort.Slice(uploadPartInfos, func(i, j int) bool {
 		return uploadPartInfos[i].PartNumber < uploadPartInfos[j].PartNumber
 	})
@@ -1145,6 +1145,10 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 		ss.FreeSectionReader(rd)
 		if err != nil {
 			return err
+		}
+		// 记录进度，供断点续传时知道从哪一片接着来
+		if onPartDone != nil {
+			onPartDone(int64(uploadPartInfo.PartNumber))
 		}
 	}
 	return nil

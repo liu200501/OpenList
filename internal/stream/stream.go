@@ -165,6 +165,24 @@ func (f *FileStream) CacheFullAndWriter(up *model.UpdateProgress, writer io.Writ
 	return f.ensureCache(f.GetSize())
 }
 
+// Rewind 把源流回绕到起点，供上传重试 / 断点续传复用。
+// 只有整段数据已经缓存（asTask 上传时 putAsTask 会先 CacheFullAndWriter）才可用；
+// 没缓存住的流回绕不了，调用方应当放弃续传。
+func (f *FileStream) Rewind() error {
+	if file := f.GetFile(); file != nil {
+		_, err := file.Seek(0, io.SeekStart)
+		return err
+	}
+	if f.peek != nil && f.peek.Size() >= f.GetSize() {
+		if _, err := f.peek.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		f.Reader = f.peek
+		return nil
+	}
+	return fmt.Errorf("stream (size=%d) is not fully cached, cannot rewind", f.GetSize())
+}
+
 func (f *FileStream) GetFile() model.File {
 	if file, ok := f.Reader.(model.File); ok {
 		return file
