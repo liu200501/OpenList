@@ -155,7 +155,12 @@ func isConsistent(a, b model.Obj) bool {
 }
 
 func (d *Alias) getAllObjs(ctx context.Context, bObj model.Obj, ifContinue func(err error) (bool, error)) (BalancedObjs, error) {
-	objs := bObj.(BalancedObjs)
+	objs, ok := bObj.(BalancedObjs)
+	if !ok {
+		// 虚拟聚合目录（多映射时的根目录、listRoot 造出来的分组目录）不对应任何真实路径，
+		// 不能当作普通目录去改名/删除/建目录，这里直接给明确错误，避免类型断言 panic。
+		return nil, ErrVirtualFolderNotWritable
+	}
 	length := 0
 	for _, o := range objs {
 		var err error

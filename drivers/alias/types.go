@@ -33,6 +33,9 @@ var (
 	ErrSamePathLeak     = errors.New("leak some of same-name dirs")
 	ErrNoEnoughSpace    = errors.New("none of same-name dirs has enough space")
 	ErrNotEnoughSrcObjs = errors.New("cannot move fewer objs to more paths, please try copying")
+	// ErrVirtualFolderNotWritable 虚拟聚合目录不对应任何真实路径，
+	// 只能通过「覆盖 paths 中已映射的文件」来写入。
+	ErrVirtualFolderNotWritable = errors.New("alias: this folder is virtual, only mapped files can be overwritten")
 )
 
 type BalancedObjs []model.Obj

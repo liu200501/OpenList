@@ -91,12 +91,16 @@ func (d *Alias) Init(ctx context.Context) error {
 		}
 		d.root = roots
 	default:
+		// 多映射（或文件级别名）时，根目录是聚合出来的虚拟目录，没有任何真实后端路径。
+		// 这里只标记 Locked（禁止改名/删除/移动），不标记 NoWrite，
+		// 否则连「覆盖已映射文件」这类写穿操作也会被 op 层直接拦掉。
+		// 真正的可写范围由 Put 里的文件级别名分支严格控制，见 putFileAliasTargets。
 		d.root = &model.Object{
 			Name:     "root",
 			Path:     "/",
 			IsFolder: true,
 			Modified: d.Modified,
-			Mask:     model.ReadOnly,
+			Mask:     model.Locked,
 		}
 	}
 
@@ -440,7 +444,116 @@ func (d *Alias) Remove(ctx context.Context, obj model.Obj) error {
 	return err
 }
 
+// renamedObj 只覆盖对象名，其余属性透传。
+// 用于「别名名 ≠ 真实文件名」时，把内容写到映射目标的真实文件名上。
+type renamedObj struct {
+	model.Obj
+	name string
+}
+
+func (o *renamedObj) GetName() string { return o.name }
+
+// isVirtualRoot 判断 obj 是否为聚合出来的虚拟根目录。
+// 只有 paths 恰好一条映射时，根目录才是真实目录（BalancedObjs）；
+// 其余情况根目录纯粹是拼接出来的视图，没有对应的后端路径。
+func isVirtualRoot(obj model.Obj) bool {
+	if obj == nil {
+		return false
+	}
+	if _, ok := obj.(BalancedObjs); ok {
+		return false
+	}
+	return obj.GetPath() == "/"
+}
+
+// fileAliasTargets 判断「往虚拟根目录里写 name」是否命中文件级别名。
+func (d *Alias) fileAliasTargets(ctx context.Context, dstDir model.Obj, name string) ([]string, bool) {
+	targets, ok := d.pathMap[name]
+	if !ok || len(targets) == 0 {
+		return nil, false
+	}
+	if isVirtualRoot(dstDir) {
+		return targets, true
+	}
+	// 只有一条映射时，根目录就是映射目标本身：
+	// 目标确实是文件才按文件级别名处理，目标还是目录就沿用原来的目录写入逻辑。
+	if len(d.rootOrder) == 1 && d.rootOrder[0] == name {
+		if obj, err := fs.Get(ctx, targets[0], &fs.GetArgs{NoLog: true}); err == nil && !obj.IsDir() {
+			return targets, true
+		}
+	}
+	return nil, false
+}
+
+// putToAliasTarget 把内容写入 targetPath 指向的真实文件（覆盖）。
+func putToAliasTarget(ctx context.Context, targetPath string, s model.FileStreamer, up driver.UpdateProgress) error {
+	storage, actualPath, err := op.GetStorageAndActualPath(targetPath)
+	if err != nil {
+		return fmt.Errorf("alias: 无法解析映射目标 [%s]: %w", targetPath, err)
+	}
+	name := stdpath.Base(actualPath)
+	var obj model.Obj = s
+	if s.GetName() != name {
+		obj = &renamedObj{Obj: s, name: name}
+	}
+	return op.Put(ctx, storage, stdpath.Dir(actualPath), &stream.FileStream{
+		Obj:      obj,
+		Mimetype: s.GetMimetype(),
+		Reader:   s,
+	}, up)
+}
+
+// putFileAliasTargets 实现「文件级别名」写穿：
+// paths 里形如 `别名.md:/真实路径/xxx.md` 的映射，上传同名文件时直接覆盖真实文件。
+func (d *Alias) putFileAliasTargets(ctx context.Context, targets []string, s model.FileStreamer, up driver.UpdateProgress) error {
+	if up == nil {
+		up = func(p float64) {}
+	}
+	// 一个名字只映射到一个目标时不存在「同路径冲突」，不受上传冲突策略影响，直接覆盖。
+	// （disabled 的语义是"遇到同名后端路径时不处理"，而不是禁止覆盖唯一目标）
+	if len(targets) == 1 {
+		return putToAliasTarget(ctx, targets[0], s, up)
+	}
+	// 只有同名映射到多个目标时，才需要按冲突策略决定写几个
+	switch d.PutConflictPolicy {
+	case AllRWP, AllStrictWP:
+		// 全部回写
+	case DisabledWP:
+		return fmt.Errorf("alias: 该文件名映射了多个目标且上传冲突策略为 disabled，拒绝写入: %w", errs.PermissionDenied)
+	default:
+		targets = targets[:1]
+	}
+	if len(targets) == 1 {
+		return putToAliasTarget(ctx, targets[0], s, up)
+	}
+	// 多目标：先缓存完整内容，再逐个回写
+	cached, err := s.CacheFullAndWriter(nil, nil)
+	if err != nil {
+		return err
+	}
+	count := float64(len(targets) + 1)
+	up(100 / count)
+	for i, target := range targets {
+		if e := putToAliasTarget(ctx, target, &stream.FileStream{
+			Obj:      s,
+			Mimetype: s.GetMimetype(),
+			Reader:   cached,
+		}, up); e != nil {
+			err = errors.Join(err, e)
+		}
+		up(float64(i+2) / count * 100)
+		if _, e := cached.Seek(0, io.SeekStart); e != nil {
+			return errors.Join(err, e)
+		}
+	}
+	return err
+}
+
 func (d *Alias) Put(ctx context.Context, dstDir model.Obj, s model.FileStreamer, up driver.UpdateProgress) error {
+	// 文件级别名：虚拟根目录下上传「已映射的同名文件」时，直接写回它映射到的真实文件。
+	if targets, ok := d.fileAliasTargets(ctx, dstDir, s.GetName()); ok {
+		return d.putFileAliasTargets(ctx, targets, s, up)
+	}
 	objs, err := d.getPutObjs(ctx, dstDir)
 	if err == nil {
 		if len(objs) == 1 {
