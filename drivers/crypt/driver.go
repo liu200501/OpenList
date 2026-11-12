@@ -80,6 +80,9 @@ func (d *Crypt) Init(ctx context.Context) error {
 	}
 	d.cipher = c
 
+	// 没有索引文件时后台建一次全量索引；有则跳过，避免每次启动都扫盘
+	d.ensureNameMapIndex()
+
 	return nil
 }
 
@@ -165,7 +168,7 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 	}
 
 	// 记录明文名与云盘上密文名的对应关系，供对照页展示（异步落盘、自动防抖）
-	d.recordNameMap(args.ReqPath, result)
+	d.recordNameMap(args.ReqPath, remoteActualOf(remoteFullPath), result)
 
 	return result, nil
 }
@@ -320,11 +323,19 @@ func (d *Crypt) MakeDir(ctx context.Context, parentDir model.Obj, dirName string
 		return err
 	}
 	encryptedName := d.cipher.EncryptDirName(dirName)
-	return op.MakeDir(ctx, remoteStorage, stdpath.Join(remoteActualPath, encryptedName))
+	err = op.MakeDir(ctx, remoteStorage, stdpath.Join(remoteActualPath, encryptedName))
+	if err == nil {
+		d.refreshNameMapDir(parentDir.GetPath())
+	}
+	return err
 }
 
 func (d *Crypt) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 	_, err := fs.Move(ctx, srcObj.GetPath(), dstDir.GetPath())
+	if err == nil {
+		d.refreshNameMapDir(stdpath.Dir(srcObj.GetPath()))
+		d.refreshNameMapDir(dstDir.GetPath())
+	}
 	return err
 }
 
@@ -339,11 +350,18 @@ func (d *Crypt) Rename(ctx context.Context, srcObj model.Obj, newName string) er
 	} else {
 		newEncryptedName = d.cipher.EncryptFileName(newName)
 	}
-	return op.Rename(ctx, remoteStorage, remoteActualPath, newEncryptedName)
+	err = op.Rename(ctx, remoteStorage, remoteActualPath, newEncryptedName)
+	if err == nil {
+		d.refreshNameMapDir(stdpath.Dir(srcObj.GetPath()))
+	}
+	return err
 }
 
 func (d *Crypt) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 	_, err := fs.Copy(ctx, srcObj.GetPath(), dstDir.GetPath())
+	if err == nil {
+		d.refreshNameMapDir(dstDir.GetPath())
+	}
 	return err
 }
 
@@ -352,7 +370,11 @@ func (d *Crypt) Remove(ctx context.Context, obj model.Obj) error {
 	if err != nil {
 		return err
 	}
-	return op.Remove(ctx, remoteStorage, remoteActualPath)
+	err = op.Remove(ctx, remoteStorage, remoteActualPath)
+	if err == nil {
+		d.refreshNameMapDir(stdpath.Dir(obj.GetPath()))
+	}
+	return err
 }
 
 func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileStreamer, up driver.UpdateProgress) error {
@@ -407,6 +429,10 @@ func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileSt
 	if cleanup != nil {
 		// 上传成功就释放密文缓存；失败则保留，供下次续传复用同一份字节
 		cleanup(err == nil)
+	}
+	if err == nil {
+		// 新文件立刻进索引，不用再手动点进这个目录
+		d.refreshNameMapDir(dstDir.GetPath())
 	}
 	return err
 }

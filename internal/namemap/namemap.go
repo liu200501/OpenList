@@ -1,6 +1,7 @@
 package namemap
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,4 +32,21 @@ func JSONPath(id uint) string {
 
 func EnsureDir() error {
 	return os.MkdirAll(Dir(), 0o755)
+}
+
+type stateFile struct {
+	Mount string `json:"mount"`
+}
+
+// ReadMount 从索引文件里读出挂载点，供路由侧定位存储实例。
+func ReadMount(id uint) string {
+	b, err := os.ReadFile(JSONPath(id))
+	if err != nil {
+		return ""
+	}
+	var s stateFile
+	if json.Unmarshal(b, &s) != nil {
+		return ""
+	}
+	return s.Mount
 }

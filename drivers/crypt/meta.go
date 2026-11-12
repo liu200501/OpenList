@@ -22,6 +22,10 @@ type Addition struct {
 	DisableResumable bool `json:"disable_resumable_upload" default:"false" help:"turn off pause/resume for uploads: no ciphertext is pre-written to the temp dir, and an interrupted upload has to restart from the beginning"`
 
 	ShowHidden bool `json:"show_hidden"  default:"true" required:"false" help:"show hidden directories and files"`
+
+	// 后台全量扫描，生成完整的「明文 ↔ 密文」索引（不必逐层浏览）。
+	// 打开后每次存储加载会在后台遍历整棵目录树；大容量存储会持续较久。
+	NameMapScan bool `json:"name_map_scan" default:"true" required:"false" help:"build a full plaintext/ciphertext name index in the background on startup (slow on large drives)"`
 }
 
 var config = driver.Config{
