@@ -46,6 +46,8 @@ func Init(e *gin.Engine) {
 
 	downloadLimiter := middlewares.DownloadRateLimiter(stream.ClientDownloadLimit)
 	signCheck := middlewares.Down(sign.Verify)
+	// crypt 明文/密文对照页，签名规则与 /d 一致
+	g.GET("/cryptmap/:id", handles.CryptNameMap)
 	g.GET("/d/*path", middlewares.PathParse, signCheck, downloadLimiter, handles.Down)
 	g.GET("/p/*path", middlewares.PathParse, signCheck, downloadLimiter, handles.Proxy)
 	g.HEAD("/d/*path", middlewares.PathParse, signCheck, handles.Down)

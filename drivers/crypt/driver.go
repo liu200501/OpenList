@@ -164,6 +164,9 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		})
 	}
 
+	// 记录明文名与云盘上密文名的对应关系，供对照页展示（异步落盘、自动防抖）
+	d.recordNameMap(args.ReqPath, result)
+
 	return result, nil
 }
 

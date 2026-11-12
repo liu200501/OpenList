@@ -173,3 +173,62 @@ Thanks goes to these wonderful people:
 
 [![Contributors](https://contrib.rocks/image?repo=OpenListTeam/OpenList)](https://github.com/OpenListTeam/OpenList/graphs/contributors)
 
+
+---
+
+## 本地扩展：crypt 明文 ↔ 密文对照页
+
+> 仅存在于本仓库的特性，对上游行为无影响。
+
+### 解决什么问题
+
+crypt 存储加密后，云盘上全是 `b6S6AS6qek5zE6aSGvSnJg` 这样的名字，
+想确认某个文件到底对应哪个乱码名非常麻烦。本特性会在浏览目录时自动记录映射，
+生成一个可直接在浏览器打开的对照页。
+
+### 行为
+
+- 每次列目录，记录「明文名 ↔ 云盘原名」到内存（按存储实例隔离）
+- 2 秒防抖后生成两份文件，放在数据库同级的 `cryptmap/` 目录：
+  - `<存储ID>.html` —— 可直接打开的对照页
+  - `<存储ID>.json` —— 原始映射，重启后自动恢复
+- 访问地址：`/cryptmap/<存储ID>?sign=...`
+  - 签名规则与 `/d` 下载链接一致（`internal/sign`），未带签名返回 401
+  - 生成完成时日志会打印完整链接：
+    `[crypt] name map of storage /加密存储 updated (128 entries): /cryptmap/41?sign=...`
+
+### 页面内容
+
+- 头部：挂载点、存储 ID、最后更新时间
+- 搜索框：同时匹配明文名与密文名
+- 表格：类型（目录/文件）、明文路径（按层级缩进）、云盘上的名字（文件附带大小）
+- 底部：目录数 / 文件数统计
+- 纯静态、无外部依赖，跟随系统深浅色
+
+### 实现
+
+| 文件 | 职责 |
+| --- | --- |
+| `drivers/crypt/namemap.go` | `recordNameMap`（List 钩子）、`flushNameMap`（防抖写盘）、`renderNameMap`（`html/template` 渲染） |
+| `internal/namemap/namemap.go` | 文件路径：`<数据目录>/cryptmap/<id>.{html,json}` |
+| `server/handles/cryptmap.go` | 验签后返回 HTML |
+| `server/router.go` | 注册 `GET /cryptmap/:id` |
+
+数据以「云盘上的真实路径」为 key，因此同一文件在明文侧改名不影响已有记录。
+
+### 性能
+
+- 列目录时只做一次内存 map 比对，命中未变化则完全不落盘
+- 写盘异步且 2 秒防抖，短时间连续浏览只写一次
+- 渲染是 `O(n log n)` 排序 + 模板输出；几千条目仍在几十毫秒量级
+- 内存占用与条目数成正比，单条约 100 字节
+
+### 限制
+
+- 只记录**浏览过**的目录，不做全盘扫描；访问越多越完整
+- 云盘上删除/改名后，旧条目会保留在 JSON 里；需要时可以删除 `cryptmap/<id>.json` 重新累积
+- 链接带签名，等同 `/d` 下载链接的权限，请勿公开分享
+
+### 测试
+
+`drivers/crypt/namemap_test.go` 校验渲染结果包含明文、密文、统计信息，且行序按明文路径排列。
