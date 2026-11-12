@@ -22,6 +22,7 @@ const (
 	MainColor                      = "main_color"
 	HideStorageDetails             = "hide_storage_details"
 	HideStorageDetailsInManagePage = "hide_storage_details_in_manage_page"
+	StorageDetailsTimeoutSeconds   = "storage_details_timeout_seconds"
 
 	// preview
 	TextTypes                     = "text_types"
@@ -184,6 +185,8 @@ const (
 	MediaThumbnailMode     = "media_thumbnail_mode"
 	MediaThumbnailPath     = "media_thumbnail_path"
 	MediaStoreThumbnail    = "media_store_thumbnail"
+	MediaOverwriteCover    = "media_overwrite_cover"    // 刮削是否覆盖已有封面（默认关闭：只补空）
+	MediaSkipFileMetadata  = "media_skip_file_metadata" // 是否禁止读取媒体文件内容（ID3 / 内嵌封面 / EXIF），只用文件名与目录名
 	MediaScrapeConcurrency = "media_scrape_concurrency"
 	MediaScrapeLanguage    = "media_scrape_language"  // 首选刮削语言（TMDB / Google Books）
 	MediaBookSource        = "media_book_source"      // 书籍刮削源：douban/google/openlibrary
@@ -270,4 +273,5 @@ const (
 	SkipNoOverwriteKey
 	ThumbnailBaseURLKey
 	KeepStreamKey
+	RemovePermanentlyKey
 )
