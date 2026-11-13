@@ -85,6 +85,21 @@ type Resumable interface {
 	Resumable() bool
 }
 
+// StreamPreparer lets a driver take over the upload stream before it is queued as
+// a task (see fs.PutAsTask). The framework normally has to materialize the whole
+// incoming stream (memory first, temp file as fallback) because the request body
+// is gone once the handler returns, while the task runs asynchronously afterwards.
+// A driver implementing this interface can do something better with that pass,
+// e.g. crypt encrypts straight into its ciphertext cache, so only one copy of the
+// data ever exists on disk and almost nothing is held in memory.
+//
+// dstDirActualPath is the destination directory as the driver itself sees it
+// (the same value Put receives). Returning a nil streamer and a nil error means
+// "not handled, fall back to the default full stream cache".
+type StreamPreparer interface {
+	PrepareUpload(ctx context.Context, dstDirActualPath string, file model.FileStreamer) (model.FileStreamer, error)
+}
+
 type Put interface {
 	// Put a file (provided as a FileStreamer) into the driver
 	// Besides the most basic upload functionality, the following features also need to be implemented:

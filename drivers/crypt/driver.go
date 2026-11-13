@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	stdpath "path"
 	"regexp"
 	"strings"
@@ -389,37 +390,60 @@ func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileSt
 	var (
 		reader  io.Reader
 		cleanup func(success bool)
+		// 密文的 SHA256：能拿到就一路传给底层，省掉它自己再全量读一遍算摘要
+		sum string
 	)
-	// 底层支持断点续传（如 139 的分片会话）、用户没关开关、且当前是可暂停的上传任务时，
-	// 必须喂同一份密文：rclone crypt 每个文件随机 nonce，重新加密会得到
-	// 完全不同的字节，已上传的分片就全废了。
-	if d.resumableWith(remoteStorage) && ctx.Value(conf.KeepStreamKey) != nil {
-		cached, cachedSize, cl, cacheErr := d.stableCiphertext(
-			ctx, remoteStorage.GetStorage().ID, remoteActualPath, encName, streamer, up)
-		if cacheErr != nil {
-			return cacheErr
+	switch s := streamer.(type) {
+	case *preparedCiphertext:
+		// 入队前已经加密落盘（见 PrepareUpload），这里只负责打开并上传
+		f, openErr := os.Open(s.path)
+		if openErr != nil {
+			return fmt.Errorf("ciphertext cache of [%s] is gone (expired or swept), please upload again: %w", s.GetName(), openErr)
 		}
-		reader, cleanup = cached, cl
-		if cachedSize > 0 {
-			encSize = cachedSize
-		}
-	} else {
-		reader, err = d.cipher.EncryptData(streamer)
-		if err != nil {
-			return fmt.Errorf("failed to EncryptData: %w", err)
+		// 必须保持 reader 的动态类型是 *os.File。*os.File 天然满足 model.File
+		// （io.ReaderAt + io.ReadSeeker），FileStream.GetFile() 的类型断言会直接命中，
+		// 于是底层驱动（139 等）的 CacheFullAndHash / NewStreamSectionReader 都复用这个句柄，
+		// 不会新建 HybridCache 把整份密文再读进内存。换成 bufio.Reader 之类会静默退化。
+		reader, encSize, sum = f, s.size, s.sum
+		cleanup = ciphertextCleanup(f, s.key)
+	default:
+		// 底层支持断点续传（如 139 的分片会话）、用户没关开关、且当前是可暂停的上传任务时，
+		// 必须喂同一份密文：rclone crypt 每个文件随机 nonce，重新加密会得到
+		// 完全不同的字节，已上传的分片就全废了。
+		if d.resumableWith(remoteStorage) && ctx.Value(conf.KeepStreamKey) != nil {
+			cached, cachedSize, cachedSum, cl, cacheErr := d.stableCiphertext(
+				ctx, remoteStorage.GetStorage().ID, remoteActualPath, encName, streamer, up)
+			if cacheErr != nil {
+				return cacheErr
+			}
+			reader, cleanup, sum = cached, cl, cachedSum
+			if cachedSize > 0 {
+				encSize = cachedSize
+			}
+		} else {
+			reader, err = d.cipher.EncryptData(streamer)
+			if err != nil {
+				return fmt.Errorf("failed to EncryptData: %w", err)
+			}
 		}
 	}
 
 	// doesn't support seekableStream, since rapid-upload is not working for encrypted data
+	obj := &model.Object{
+		ID:       streamer.GetID(),
+		Path:     streamer.GetPath(),
+		Name:     encName,
+		Size:     encSize,
+		Modified: streamer.ModTime(),
+		IsFolder: streamer.IsDir(),
+	}
+	if sum != "" {
+		// 摘要对应的是密文字节，也就是底层实际收到的内容。
+		// 带上它，139 这类驱动会在 complete 校验里直接命中，跳过 CacheFullAndHash 的整份读取。
+		obj.HashInfo = utils.NewHashInfo(utils.SHA256, sum)
+	}
 	streamOut := &stream.FileStream{
-		Obj: &model.Object{
-			ID:       streamer.GetID(),
-			Path:     streamer.GetPath(),
-			Name:     encName,
-			Size:     encSize,
-			Modified: streamer.ModTime(),
-			IsFolder: streamer.IsDir(),
-		},
+		Obj:               obj,
 		Reader:            reader,
 		Mimetype:          "application/octet-stream",
 		ForceStreamUpload: true,
@@ -449,6 +473,48 @@ func (d *Crypt) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 	return &model.StorageDetails{
 		DiskUsage: remoteDetails.DiskUsage,
 	}, nil
+}
+
+// preparedCiphertext 是「已加密落盘、只等上传」的流。外层保留明文的 FileStreamer
+// （Put 里还要用它算加密后的名字/大小，并沿用 mtime 等元信息），密文以缓存文件随行。
+type preparedCiphertext struct {
+	model.FileStreamer
+	key  string
+	path string
+	size int64
+	// sum 是密文的 SHA256，加密时顺手算出来的。
+	// 带上它，底层驱动（139 等）就不用为了算摘要再全量读一遍这份密文。
+	sum string
+}
+
+// PrepareUpload 实现 driver.StreamPreparer：在任务入队前就把明文流直接加密落盘。
+// 框架默认会先把整份明文缓存下来（HybridCache 内存优先），任务再拿这份明文去加密，
+// 结果是「明文占内存 + 密文占磁盘」两份数据。这里把两步合成一步：读完请求体就直接
+// 得到密文，明文既不落地也不进内存，上传任务只持有一份密文。
+//
+// 底层不支持续传时没必要落盘（流式加密就够），返回 nil 交回默认行为。
+func (d *Crypt) PrepareUpload(ctx context.Context, dstDirActualPath string, streamer model.FileStreamer) (model.FileStreamer, error) {
+	remote, _, err := op.GetStorageAndActualPath(d.RemotePath)
+	if err != nil {
+		log.Warnf("crypt: failed to resolve remote storage [%s], fall back to default stream cache: %v", d.RemotePath, err)
+		return nil, nil
+	}
+	// 大小未知（-1）时算不出密文长度，交给默认缓存先把流落到磁盘。
+	// 注意 0 字节文件是可以走这条路的：EncryptedSize(0) 返回 32 字节文件头，一样能预加密。
+	if !d.resumableWith(remote) || streamer.GetSize() < 0 {
+		return nil, nil
+	}
+
+	virtualPath := stdpath.Join(d.GetStorage().MountPath, dstDirActualPath, streamer.GetName())
+	key := cipherCacheKey(d.GetStorage().ID, virtualPath, streamer.GetSize(), streamer.ModTime())
+	// 入队前顺手清一次过期缓存：中断后没再被重试的任务，只能靠这里回收临时文件
+	sweepExpired()
+	path, size, sum, err := d.materializeCiphertext(ctx, key, virtualPath, streamer, nil)
+	if err != nil {
+		return nil, err
+	}
+	log.Debugf("crypt: prepared ciphertext of [%s] (%d bytes, sha256=%s) before enqueue", virtualPath, size, sum)
+	return &preparedCiphertext{FileStreamer: streamer, key: key, path: path, size: size, sum: sum}, nil
 }
 
 // resumableWith 判断「经此 crypt 存储上传到 remote 能不能暂停/继续」。

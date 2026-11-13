@@ -103,6 +103,26 @@ func (t *UploadTask) SetRetry(retry int, maxRetry int) {
 
 var UploadTaskManager *tache.Manager[*UploadTask]
 
+// prepareUploadStream 让驱动有机会在入队前把上传流处理成「可重放」的形态。
+// 请求体在 handler 返回后就没了，而任务是在之后异步执行的，所以这一步必须同步做完。
+// 默认做法是把整份流缓存下来（内存优先，磁盘兜底）；实现了 driver.StreamPreparer 的
+// 驱动可以在这趟里顺便做自己的事，比如 crypt 直接把明文加密落盘，从而省掉明文那份缓存。
+func prepareUploadStream(ctx context.Context, storage driver.Driver, dstDirActualPath string, file model.FileStreamer) (model.FileStreamer, error) {
+	if p, ok := storage.(driver.StreamPreparer); ok {
+		prepared, err := p.PrepareUpload(ctx, dstDirActualPath, file)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to prepare upload stream")
+		}
+		if prepared != nil {
+			return prepared, nil
+		}
+	}
+	if _, err := file.CacheFullAndWriter(nil, nil); err != nil {
+		return nil, errors.Wrapf(err, "failed to create temp file")
+	}
+	return nil, nil
+}
+
 // putAsTask add as a put task and return immediately
 func putAsTask(ctx context.Context, dstDirPath string, file model.FileStreamer) (task.TaskExtensionInfo, error) {
 	storage, dstDirActualPath, err := op.GetStorageAndActualPath(dstDirPath)
@@ -113,12 +133,13 @@ func putAsTask(ctx context.Context, dstDirPath string, file model.FileStreamer) 
 		return nil, errors.WithStack(errs.UploadNotSupported)
 	}
 	if file.NeedStore() {
-		_, err := file.CacheFullAndWriter(nil, nil)
+		prepared, err := prepareUploadStream(ctx, storage, dstDirActualPath, file)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to create temp file")
+			return nil, err
 		}
-		//file.SetReader(tempFile)
-		//file.SetTmpFile(tempFile)
+		if prepared != nil {
+			file = prepared
+		}
 	}
 	taskCreator, _ := ctx.Value(conf.UserKey).(*model.User) // taskCreator is nil when convert failed
 	t := &UploadTask{
