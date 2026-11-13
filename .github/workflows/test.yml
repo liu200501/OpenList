@@ -1,0 +1,74 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: '同时跑 crypt 加密落盘基准'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    name: Go test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        shell: bash
+        # pkg/aria2/rpc 的用例需要本地跑着 aria2 的 JSON-RPC 守护进程（127.0.0.1:6800），
+        # CI 上没人监听，必然失败，所以排除。其余包全跑。
+        run: |
+          set -euo pipefail
+          PKGS=$(go list ./... | grep -v '/pkg/aria2/rpc$')
+          go test $PKGS -count=1 -timeout 20m
+
+  crypt-upload:
+    name: Crypt 上传链路 (race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Race test
+        run: go test -race ./drivers/crypt/ ./internal/fs/ ./internal/hybrid_cache/ ./internal/driver/ -count=1 -timeout 15m
+
+      - name: Benchmark
+        # 只手动触发，且文件小一些：基准数据默认 256MiB，CI 上没必要那么久
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bench }}
+        env:
+          OPENLIST_BENCH_SIZE_MB: '32'
+        run: go test ./drivers/crypt/ -run XXX -bench . -benchtime=3x -count=1
