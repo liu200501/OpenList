@@ -187,22 +187,22 @@ func InitialSettings() []model.SettingItem {
 		{Key: conf.ShareSummaryContent, Value: "@{{creator}} shared {{#each files}}{{#if @first}}\"{{filename this}}\"{{/if}}{{#if @last}}{{#unless (eq @index 0)}} and {{@index}} more files{{/unless}}{{/if}}{{/each}} from {{site_title}}: {{base_url}}/@s/{{id}}{{#if pwd}} , the share code is {{pwd}}{{/if}}{{#if expires}}, please access before {{dateLocaleString expires}}.{{/if}}", Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PUBLIC},
 		{Key: conf.HandleHookAfterWriting, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PRIVATE},
 		{Key: conf.HandleHookRateLimit, Value: "0", Type: conf.TypeNumber, Group: model.GLOBAL, Flag: model.PRIVATE},
-		{Key: conf.IgnoreSystemFiles, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `When enabled, ignores common system files during upload (.DS_Store, desktop.ini, Thumbs.db, and files starting with ._)`},
-		{Key: conf.SeedSiteURL, Value: "", Type: conf.TypeString, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `Public base URL embedded in generated transfer seed sources when configured`},
-		{Key: conf.SeedDefaultMatrix, Value: `{"md5":{"whole":true,"pieces":false},"sha1":{"whole":true,"pieces":false},"sha256":{"whole":true,"pieces":false}}`, Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `Default right-click hash matrix for transfer seed generation`},
+		{Key: conf.IgnoreSystemFiles, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `开启后上传时忽略常见系统文件（.DS_Store、desktop.ini、Thumbs.db 以及以 ._ 开头的文件）`},
+		{Key: conf.SeedSiteURL, Value: "", Type: conf.TypeString, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `配置后，生成转存种子来源时写入的公开基础 URL`},
+		{Key: conf.SeedDefaultMatrix, Value: `{"md5":{"whole":true,"pieces":false},"sha1":{"whole":true,"pieces":false},"sha256":{"whole":true,"pieces":false}}`, Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `右键生成转存种子时默认勾选的哈希矩阵`},
 		{Key: conf.SeedFormatPolicies, Value: `{"oss":"off","torrent":"off","cas":"off"}`, Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PRIVATE},
 		{Key: conf.SeedDefaultFormat, Value: "oss", Type: conf.TypeSelect, Options: "oss,torrent,cas", Group: model.GLOBAL, Flag: model.PRIVATE},
 		{Key: conf.SeedSingleDirectPreview, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PUBLIC},
-		{Key: conf.SeedCASDirectAccess, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PUBLIC, Help: `When opening a single-file CAS seed, immediately rapid-upload it into the same folder and preview the restored file`},
-		{Key: conf.SeedAutoGeneratePolicy, Value: "off", Type: conf.TypeSelect, Options: "off,on", Group: model.GLOBAL, Flag: model.PRIVATE, Help: `Global upload sidecar policy; storage-specific inheritance can be layered without changing the safe default`},
-		{Key: conf.SeedDefaultTrackers, Value: "", Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `Default tracker list offered when generating torrent seeds (one tracker per line)`},
+		{Key: conf.SeedCASDirectAccess, Value: "false", Type: conf.TypeBool, Group: model.GLOBAL, Flag: model.PUBLIC, Help: `打开单文件 CAS 种子时，立即将其秒传到同一目录并预览还原后的文件`},
+		{Key: conf.SeedAutoGeneratePolicy, Value: "off", Type: conf.TypeSelect, Options: "off,on", Group: model.GLOBAL, Flag: model.PRIVATE, Help: `全局上传附属种子策略；各存储可在此基础上叠加继承配置，而不改变安全的默认值`},
+		{Key: conf.SeedDefaultTrackers, Value: "", Type: conf.TypeText, Group: model.GLOBAL, Flag: model.PRIVATE, Help: `生成 Torrent 种子时提供的默认 Tracker 列表（每行一个）`},
 
 		// single settings
 		{Key: conf.Token, Value: token, Type: conf.TypeString, Group: model.SINGLE, Flag: model.PRIVATE},
 		{Key: conf.SearchIndex, Value: "none", Type: conf.TypeSelect, Options: "database,database_non_full_text,bleve,meilisearch,none", Group: model.INDEX},
 		{Key: conf.AutoUpdateIndex, Value: "false", Type: conf.TypeBool, Group: model.INDEX},
-		{Key: conf.IgnorePaths, Value: "", Type: conf.TypeText, Group: model.INDEX, Flag: model.PRIVATE, Help: `one path per line`},
-		{Key: conf.MaxIndexDepth, Value: "20", Type: conf.TypeNumber, Group: model.INDEX, Flag: model.PRIVATE, Help: `max depth of index`},
+		{Key: conf.IgnorePaths, Value: "", Type: conf.TypeText, Group: model.INDEX, Flag: model.PRIVATE, Help: `每行一条路径`},
+		{Key: conf.MaxIndexDepth, Value: "20", Type: conf.TypeNumber, Group: model.INDEX, Flag: model.PRIVATE, Help: `索引最大深度`},
 		{Key: conf.IndexProgress, Value: "{}", Type: conf.TypeText, Group: model.SINGLE, Flag: model.PRIVATE},
 
 		// SSO settings
@@ -376,7 +376,7 @@ videotoolbox = macOS 硬件加速`},
 
 		// multipart upload settings (from main)
 		{Key: conf.MultipartEnabled, Value: "true", Type: conf.TypeBool, Group: model.TRAFFIC, Flag: model.PUBLIC},
-		{Key: conf.MultipartChunkSize, Value: "10", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PUBLIC, Help: `chunk size of multipart upload in MB (positive integer), keep it under your CDN's request body limit; each active session buffers up to 8 chunks on the server's disk`},
+		{Key: conf.MultipartChunkSize, Value: "10", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PUBLIC, Help: `分片上传的单片大小（MB，正整数），请保持在 CDN 请求体限制之内；每个活动会话最多在服务器磁盘缓冲 8 个分片`},
 	}
 	additionalSettingItems := tool.Tools.Items()
 	// 固定顺序
