@@ -199,6 +199,8 @@ func admin(g *gin.RouterGroup) {
 	storage.POST("/collect", handles.CollectToFavorite)
 	storage.GET("/collect/list", handles.ListCollects)
 	storage.POST("/collect/remove", handles.RemoveFavorite)
+	// crypt 存储的明文/密文对照页地址（带签名）
+	storage.GET("/namemap", handles.CryptNameMapLink)
 
 	driver := g.Group("/driver")
 	driver.GET("/list", handles.ListDriverInfo)
