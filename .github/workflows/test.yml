@@ -38,6 +38,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Prepare embedded web assets
+        shell: bash
+        # public/public.go 是 //go:embed all:dist，而 public/dist 不进仓库（.gitignore）。
+        # CI 只要能编译，放一个占位文件即可，不必下载真实前端产物。
+        run: |
+          mkdir -p public/dist
+          [ -f public/dist/index.html ] || printf '<!doctype html><title>CI placeholder</title>\n' > public/dist/index.html
+
       - name: Build
         run: go build ./...
 
