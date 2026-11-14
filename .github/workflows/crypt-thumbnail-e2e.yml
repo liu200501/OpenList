@@ -1,0 +1,515 @@
+# crypt 缩略图同步端到端验证（仅手动触发）
+#
+# 前端部署方式判定（先读文件再决定，不复用任何已有 dist 产物）：
+#   * public/public.go:5 是 `//go:embed all:dist` —— 前端产物由后端托管，构建后 embed 进二进制，
+#     不是独立前端服务；server/static/static.go:40 显示仅当 conf.DistDir 非空才改用外部目录。
+#   * 后端根 package.json 只有 wrangler（Workers 工具），没有前端构建脚本；仓库内没有 Makefile。
+#   * 前端源码在独立仓库 OpenListTeam/OpenList-Frontend，其 package.json 的 scripts.build = "vite build"，
+#     packageManager = "pnpm@11.25.0"。
+#   构建步骤为：checkout 前端源码 -> pnpm install --frozen-lockfile -> pnpm build (vite build)
+#   -> 复制 dist 到 public/dist -> go build 由 //go:embed 打进二进制 -> 后端在 localhost:5244 托管首页。
+#   public/dist 被 .gitignore 排除，因此干净 runner 上必须先有产物才能编译；占位 index.html 只用于
+#   满足编译，随后立即被前端源码构建产物覆盖，构建失败即终止，不拿占位产物冒充源码构建。
+#
+# crypt 缩略图语义（drivers/crypt/meta.go:18）：缩略图需「预先生成在 .thumbnails 目录下」，
+# crypt 的 List 只按 <当前目录>/.thumbnails/<明文文件名>.webp 拼签名 URL，不会自动生成 webp。
+# 所以 E2E 先上传 PNG 主文件，再把 WebP 上传到同名 .thumbnails 目录，然后断言 thumb URL 返回 200。
+# 5244 是 HTTP 端口，5246 是 S3 端口（config.json 的 s3.port），本工作流只监听 5244。
+
+name: Crypt Thumbnail E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crypt-thumbnail-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENLIST_ADMIN_PASSWORD: E2ePass123!
+  E2E_DIR: .e2e
+  E2E_BASE: http://127.0.0.1:5244
+
+jobs:
+  e2e:
+    name: crypt 缩略图同步 E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout 后端源码
+        uses: actions/checkout@v4
+
+      - name: Setup Go（go.mod 指定版本）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 校验 Go 工具链（必要时回退 GOTOOLCHAIN=local）
+        shell: bash
+        # 先按标准方式写：setup-go 依据 go.mod 的 `go 1.26.0` 安装。
+        # go.mod 另有 `toolchain go1.27.3` 指令，go 命令会尝试自动下载该工具链；
+        # 若 runner 因 checksum 校验 / 网络策略下载失败，所有 go 命令都会直接报错。
+        # 因此这里探测一次，仅在失败时把 GOTOOLCHAIN=local 写入 GITHUB_ENV（后续 step 生效），
+        # 用 setup-go 已装好的版本编译；go >= 1.26 满足本项目要求。
+        # 本地已验证 GOTOOLCHAIN=local 下 go test / go build / go vet 全部通过。
+        run: |
+          set -euo pipefail
+          if go version >/dev/null 2>&1; then
+            echo "toolchain ok: $(go version)"
+          else
+            echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+            echo "go.mod toolchain 下载失败，回退 GOTOOLCHAIN=local"
+          fi
+          GOTOOLCHAIN=local go version
+
+      - name: Setup Node（前端源码构建）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Checkout 前端源码（OpenListTeam/OpenList-Frontend）
+        uses: actions/checkout@v4
+        with:
+          repository: OpenListTeam/OpenList-Frontend
+          path: .e2e/frontend-src
+          persist-credentials: false
+
+      - name: 从前端源码构建 dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 占位只为满足 //go:embed all:dist 的编译要求（与 test.yml 相同做法），
+          # 下面 pnpm build 的产物会整体替换它；本 step 失败会让工作流失败。
+          mkdir -p public/dist
+          printf '<!doctype html><title>placeholder</title>\n' > public/dist/index.html
+          corepack enable || npm install -g pnpm@11.25.0
+          corepack prepare pnpm@11.25.0 --activate || true
+          cd .e2e/frontend-src
+          pnpm --version
+          pnpm install --frozen-lockfile
+          pnpm build
+          cd "$GITHUB_WORKSPACE"
+          rm -rf public/dist
+          mkdir -p public/dist
+          cp -a .e2e/frontend-src/dist/. public/dist/
+          test -f public/dist/index.html
+          echo "前端源码构建完成：$(find public/dist -type f | wc -l) 个文件"
+
+      - name: 从源码编译后端（embed 前端产物）
+        run: go build -o openlist-e2e .
+
+      - name: 启动 OpenList（localhost:5244）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .e2e/data/localroot/enc .e2e/data/localroot/enc-off
+          # 输出全部重定向到文件，避免后台进程持有 step 的 stdout 导致 runner 等待。
+          nohup ./openlist-e2e server --data "$PWD/.e2e/data" > .e2e/server.log 2>&1 &
+          echo $! > .e2e/server.pid
+          for i in $(seq 1 90); do
+            if curl -fsS --max-time 2 http://127.0.0.1:5244/ping | grep -q pong; then
+              echo "PASS: setup - /ping 返回 200 pong（${i}s）"
+              exit 0
+            fi
+            if ! kill -0 "$(cat .e2e/server.pid)" 2>/dev/null; then
+              echo "服务端进程提前退出" >&2
+              tail -n 80 .e2e/server.log >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "健康检查超时（90s）" >&2
+          tail -n 80 .e2e/server.log >&2
+          exit 1
+
+      - name: 首页由后端托管（embed 产物）
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o .e2e/index.html -w '%{http_code}' http://127.0.0.1:5244/)
+          test "$code" = 200
+          grep -qi '<!doctype\|<html' .e2e/index.html
+          echo "PASS: setup - 首页 200，来自前端源码构建的 embed 产物"
+
+      - name: 生成 E2E 断言脚本（内联，不依赖本地残留）
+        shell: bash
+        run: |
+          cat > .e2e/e2e_check.py <<'PY'
+          """crypt 缩略图同步 E2E：只通过 HTTP API 操作，不直接改数据库/文件系统。"""
+          import base64
+          import hashlib
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          BASE = os.environ.get("E2E_BASE", "http://127.0.0.1:5244")
+          E2E = os.environ.get("E2E_DIR", ".e2e")
+          LOCALROOT = os.path.abspath(os.path.join(E2E, "data", "localroot"))
+          SERVER_LOG = os.path.join(E2E, "server.log")
+          PASSWORD = os.environ.get("OPENLIST_ADMIN_PASSWORD", "E2ePass123!")
+
+          # 1x1 PNG 与两张不同的 1x1 WebP，全部内联，干净 runner 无需 ffmpeg / 素材文件。
+          PNG = base64.b64decode(
+              "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAfUlEQVR4nNXOQQkAMAzAwAzi33FhIvooOQX3hjaJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkzivA1sf0mwB+99LQWUAAAAASUVORK5CYII=")
+          WEBP_SRC = base64.b64decode(
+              "UklGRlgAAABXRUJQVlA4IEwAAADwAwCdASpAAEAAPpFIoEwlpCMiIggAsBIJaQDTyoAAEDuTwRbaZ3EAAP7u09//gN18W0y//3OB/3Bx/2Dj+NqGTC8dNeQy5vh8UyAA")
+          WEBP_STALE = base64.b64decode(
+              "UklGRlAAAABXRUJQVlA4IEQAAACQAwCdASpAAEAAPpFIoEwlpCMiIggAsBIJaQAAEGhXFsQuMAogAP71WL//+5wP/9nA//2cD+Ov/16pa5Oj+WlsHAAAAA==")
+
+          results = []
+
+
+          def check(case, label, ok, detail=""):
+              line = ("PASS: " if ok else "FAIL: ") + case + " - " + label
+              if detail:
+                  line += " | " + str(detail)
+              print(line, flush=True)
+              results.append((case, label, bool(ok), detail))
+
+
+          def http(method, path, body=None, headers=None, timeout=60):
+              h = dict(headers or {})
+              data = None
+              if body is not None:
+                  if isinstance(body, (dict, list)):
+                      data = json.dumps(body).encode("utf-8")
+                      h.setdefault("Content-Type", "application/json")
+                  else:
+                      data = body
+              req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      return r.status, r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read()
+              except urllib.error.URLError as e:
+                  return 0, str(e).encode()
+
+
+          TOKEN = ""
+
+
+          def api(method, path, body=None, expect=200):
+              code, raw = http(method, path, body, {"Authorization": TOKEN})
+              try:
+                  j = json.loads(raw)
+              except Exception:
+                  j = None
+              ok = code == expect and (j is None or j.get("code") == 200)
+              if not ok:
+                  print("   API %s %s -> HTTP %s body=%s" % (
+                      method, path, code, raw[:300].decode("utf-8", "replace")), flush=True)
+              return ok, j
+
+
+          def get_bytes(url):
+              if url.startswith("http://") or url.startswith("https://"):
+                  u = urllib.parse.urlsplit(url)
+                  path = u.path + (("?" + u.query) if u.query else "")
+              else:
+                  path = url
+              return http("GET", path, timeout=30)
+
+
+          def upload(virtual_path, data, ctype="application/octet-stream"):
+              p = urllib.parse.quote(virtual_path, safe="")
+              code, raw = http("PUT", "/api/fs/put", data,
+                               {"Authorization": TOKEN, "File-Path": p, "Content-Type": ctype})
+              j = json.loads(raw) if raw.startswith(b"{") else None
+              ok = code == 200 and j and j.get("code") == 200
+              if not ok:
+                  print("   PUT %s -> HTTP %s body=%s" % (
+                      virtual_path, code, raw[:300].decode("utf-8", "replace")), flush=True)
+              return ok
+
+
+          def mkdir(path):
+              return api("POST", "/api/fs/mkdir", {"path": path})[0]
+
+
+          def listing(path):
+              ok, j = api("POST", "/api/fs/list",
+                          {"path": path, "password": "", "page": 1, "per_page": 0, "refresh": True})
+              if not (ok and j):
+                  return []
+              return j.get("data", {}).get("content", []) or []
+
+
+          def names(path):
+              return [o.get("name") for o in listing(path)]
+
+
+          def thumb_of(path, name):
+              for o in listing(path):
+                  if o.get("name") == name:
+                      return o.get("thumb") or ""
+              return ""
+
+
+          def thumb_ok(path, name, want_bytes=None):
+              url = thumb_of(path, name)
+              if not url:
+                  return False, "列表无 thumb 字段"
+              code, body = get_bytes(url)
+              if code != 200:
+                  return False, "缩略图 HTTP %s (url=%s)" % (code, url)
+              if want_bytes is not None and body != want_bytes:
+                  return False, "字节不符: got %d bytes md5=%s, want %d bytes md5=%s" % (
+                      len(body), hashlib.md5(body).hexdigest(),
+                      len(want_bytes), hashlib.md5(want_bytes).hexdigest())
+              return True, "缩略图 HTTP 200, %d bytes, WEBP=%s" % (
+                  len(body), body[:4] == b"RIFF" and body[8:12] == b"WEBP")
+
+
+          def wait_for(path, name, timeout=40):
+              end = time.time() + timeout
+              while time.time() < end:
+                  if name in names(path):
+                      return True
+                  time.sleep(0.5)
+              return False
+
+
+          def wait_gone(path, name, timeout=40):
+              end = time.time() + timeout
+              while time.time() < end:
+                  if name not in names(path):
+                      return True
+                  time.sleep(0.5)
+              return False
+
+
+          # ------------------------------------------------------------ 0. 登录
+          code, raw = http("GET", "/ping")
+          check("setup", "GET /ping 返回 200 pong", code == 200 and raw == b"pong", "HTTP %s" % code)
+          code, raw = http("POST", "/api/auth/login", {"username": "admin", "password": PASSWORD})
+          try:
+              TOKEN = json.loads(raw).get("data", {}).get("token", "")
+          except Exception:
+              TOKEN = ""
+          check("setup", "admin 登录取得 token", bool(TOKEN), "HTTP %s, token 长度 %d" % (code, len(TOKEN)))
+
+          # ------------------------------------------------------------ 1. 存储
+          local_add = {
+              "root_folder_path": LOCALROOT,
+              "thumbnail": False,
+              "mkdir_perm": "777",
+              "recycle_bin_path": "delete permanently",
+          }
+          ok, _ = api("POST", "/api/admin/storage/create",
+                      {"mount_path": "/local", "driver": "Local",
+                       "addition": json.dumps(local_add), "order": 0})
+          check("setup", "创建 Local 底层存储 /local", ok)
+
+          crypt_add = {
+              "filename_encryption": "standard",
+              "directory_name_encryption": "true",
+              "remote_path": "/local/enc",
+              "password": "E2eCryptPass123",
+              "salt": "E2eSalt123",
+              "encrypted_suffix": ".bin",
+              "filename_encoding": "base64",
+              "thumbnail": True,
+              # ShowHidden 不显式设置，沿用驱动默认值（meta.go 的 default 标记）。
+              # 本脚本列的是显式 .thumbnails 路径，断言不依赖该开关。
+              "name_map_scan": False,
+              "disable_resumable_upload": True,
+          }
+          ok, _ = api("POST", "/api/admin/storage/create",
+                      {"mount_path": "/crypt", "driver": "Crypt",
+                       "addition": json.dumps(crypt_add), "order": 1})
+          check("setup", "创建 Crypt 挂载 /crypt（Thumbnail=true，ShowHidden 用默认值）", ok)
+
+          ok, j = api("GET", "/api/admin/storage/list")
+          data = (j or {}).get("data", {}) or {}
+          slist = data.get("content", []) if isinstance(data, dict) else []
+          check("setup", "Local 与 Crypt 存储均 status=work",
+                any(s.get("mount_path") == "/local" and s.get("status") == "work" for s in slist)
+                and any(s.get("mount_path") == "/crypt" and s.get("status") == "work" for s in slist),
+                str([(s.get("mount_path"), s.get("status")) for s in slist]))
+
+          # ------------------------------------------------------------ 2. 素材
+          dirs = ["/crypt/src", "/crypt/src/.thumbnails", "/crypt/dst", "/crypt/copydst",
+                  "/crypt/src2", "/crypt/src2/.thumbnails", "/crypt/dst2", "/crypt/dst2/.thumbnails",
+                  "/crypt/src3", "/crypt/src3/.thumbnails", "/crypt/dst3",
+                  "/crypt/dirsrc", "/crypt/dirsrc/.thumbnails", "/crypt/dirdst"]
+          failed_dirs = [d for d in dirs if not mkdir(d)]
+          check("setup", "创建 E2E 目录树", not failed_dirs, str(failed_dirs))
+          check("thumb", "上传主文件 /crypt/src/photo.png（真实 PNG）",
+                upload("/crypt/src/photo.png", PNG, "image/png"))
+          check("thumb", "预生成 WebP 上传至 .thumbnails（crypt 不自动生成缩略图）",
+                upload("/crypt/src/.thumbnails/photo.png.webp", WEBP_SRC, "image/webp"))
+          ok, detail = thumb_ok("/crypt/src", "photo.png", WEBP_SRC)
+          check("thumb", "列表 thumb URL 返回 200 且内容=源 WebP", ok, detail)
+          check("thumb", ".thumbnails 内含 photo.png.webp",
+                "photo.png.webp" in names("/crypt/src/.thumbnails"))
+
+          # ------------------------------------------------------------ 3. 复制
+          # PR 语义：Copy 走 syncThumbnailMove(copyMode=true)，目标目录生成对应缩略图。
+          # 验收允许「生成对应缩略图」或「至少不产生指向错误的 URL」，这里断言更强的那条。
+          ok, _ = api("POST", "/api/fs/copy",
+                      {"src_dir": "/crypt/src", "dst_dir": "/crypt/copydst", "names": ["photo.png"]})
+          check("copy", "POST /api/fs/copy 200", ok)
+          check("copy", "目标主文件到位", wait_for("/crypt/copydst", "photo.png"))
+          ok, detail = thumb_ok("/crypt/copydst", "photo.png", WEBP_SRC)
+          check("copy", "目标目录缩略图 200 且内容=源 WebP（生成对应缩略图）", ok, detail)
+          check("copy", "源目录缩略图仍保留",
+                "photo.png.webp" in names("/crypt/src/.thumbnails"))
+          check("copy", "目标 .thumbnails 自动生成 photo.png.webp",
+                "photo.png.webp" in names("/crypt/copydst/.thumbnails"))
+
+          # ------------------------------------------------------------ 4. 重命名
+          ok, _ = api("POST", "/api/fs/rename",
+                      {"path": "/crypt/copydst/photo.png", "name": "renamed.png", "overwrite": True})
+          check("rename", "POST /api/fs/rename 200", ok)
+          check("rename", "新文件名出现", wait_for("/crypt/copydst", "renamed.png"))
+          ok, detail = thumb_ok("/crypt/copydst", "renamed.png", WEBP_SRC)
+          check("rename", "缩略图跟随新文件名且 200", ok, detail)
+          check("rename", ".thumbnails 中 renamed.png.webp 存在",
+                "renamed.png.webp" in names("/crypt/copydst/.thumbnails"))
+          check("rename", "旧名 photo.png.webp 已不存在",
+                "photo.png.webp" not in names("/crypt/copydst/.thumbnails"))
+
+          # ------------------------------------------------------------ 5. 删除
+          ok, _ = api("POST", "/api/fs/remove",
+                      {"dir": "/crypt/copydst", "names": ["renamed.png"]})
+          check("remove", "POST /api/fs/remove 200", ok)
+          check("remove", "主文件已删除", wait_gone("/crypt/copydst", "renamed.png"))
+          check("remove", "对应 .thumbnails/*.webp 被清理",
+                "renamed.png.webp" not in names("/crypt/copydst/.thumbnails"))
+
+          # ------------------------------------------------------------ 6. 移动
+          ok, _ = api("POST", "/api/fs/move",
+                      {"src_dir": "/crypt/src", "dst_dir": "/crypt/dst", "names": ["photo.png"]})
+          check("move", "POST /api/fs/move 200", ok)
+          check("move", "目标主文件到位", wait_for("/crypt/dst", "photo.png"))
+          ok, detail = thumb_ok("/crypt/dst", "photo.png", WEBP_SRC)
+          check("move", "target thumbnail 200 且内容=源 WebP", ok, detail)
+          check("move", "源目录 .thumbnails 无残留孤儿",
+                "photo.png.webp" not in names("/crypt/src/.thumbnails"))
+          check("move", "目标 .thumbnails 有 photo.png.webp",
+                "photo.png.webp" in names("/crypt/dst/.thumbnails"))
+
+          # ------------------------------------------------------------ 7. 串图
+          check("stale", "上传 src2/twin.png", upload("/crypt/src2/twin.png", PNG, "image/png"))
+          check("stale", "上传源缩略图（红）",
+                upload("/crypt/src2/.thumbnails/twin.png.webp", WEBP_SRC, "image/webp"))
+          check("stale", "目标目录预置同名 webp（蓝）",
+                upload("/crypt/dst2/.thumbnails/twin.png.webp", WEBP_STALE, "image/webp"))
+          ok, _ = api("POST", "/api/fs/move",
+                      {"src_dir": "/crypt/src2", "dst_dir": "/crypt/dst2", "names": ["twin.png"]})
+          check("stale", "POST /api/fs/move 200", ok)
+          check("stale", "目标主文件到位", wait_for("/crypt/dst2", "twin.png"))
+          ok, detail = thumb_ok("/crypt/dst2", "twin.png", WEBP_SRC)
+          check("stale", "显示源文件自己的缩略图而非预置同名 webp", ok, detail)
+
+          # ------------------------------------------------------------ 8. 失败注入
+          check("failure", "上传 src3/fail.png", upload("/crypt/src3/fail.png", PNG, "image/png"))
+          check("failure", "上传 src3 缩略图",
+                upload("/crypt/src3/.thumbnails/fail.png.webp", WEBP_SRC, "image/webp"))
+          # 在目标目录放一个名为 .thumbnails 的普通文件：其密文名与 EncryptDirName(".thumbnails")
+          # 相同，会占住同步逻辑要创建的目录位置，使 fs.MakeDir 失败。
+          check("failure", "普通文件占住目标 .thumbnails 位置",
+                upload("/crypt/dst3/.thumbnails", b"block", "text/plain"))
+          ok, _ = api("POST", "/api/fs/move",
+                      {"src_dir": "/crypt/src3", "dst_dir": "/crypt/dst3", "names": ["fail.png"]})
+          check("failure", "主操作成功（缩略图同步失败不回滚）", ok)
+          check("failure", "主文件仍到位", wait_for("/crypt/dst3", "fail.png"))
+          logtxt = ""
+          if os.path.exists(SERVER_LOG):
+              with open(SERVER_LOG, "r", encoding="utf-8", errors="replace") as f:
+                  logtxt = f.read()
+          warns = [l for l in logtxt.splitlines()
+                   if "[crypt] thumbnail sync" in l and "failed" in l]
+          check("failure", "日志出现 [crypt] thumbnail sync 警告", len(warns) > 0,
+                "count=%d" % len(warns))
+          for l in warns[-3:]:
+              print("   LOG: " + l[:300], flush=True)
+
+          # ------------------------------------------------------------ 9. 整目录移动不回归
+          check("dir", "上传 dirsrc/inner.png", upload("/crypt/dirsrc/inner.png", PNG, "image/png"))
+          check("dir", "上传 dirsrc 缩略图",
+                upload("/crypt/dirsrc/.thumbnails/inner.png.webp", WEBP_SRC, "image/webp"))
+          ok, _ = api("POST", "/api/fs/move",
+                      {"src_dir": "/crypt", "dst_dir": "/crypt/dirdst", "names": ["dirsrc"]})
+          check("dir", "POST /api/fs/move（目录）200", ok)
+          check("dir", "目录整体到位", wait_for("/crypt/dirdst", "dirsrc"))
+          check("dir", "目录内 .thumbnails 随底层整目录搬迁",
+                "inner.png.webp" in names("/crypt/dirdst/dirsrc/.thumbnails"))
+          ok, detail = thumb_ok("/crypt/dirdst/dirsrc", "inner.png", WEBP_SRC)
+          check("dir", "目录移动后子文件缩略图仍 200", ok, detail)
+
+          # ------------------------------------------------------------ 10. 边界
+          # Thumbnail 开关关闭：不应产生任何同步。
+          off_add = dict(crypt_add)
+          off_add.update({"thumbnail": False, "remote_path": "/local/enc-off"})
+          ok, _ = api("POST", "/api/admin/storage/create",
+                      {"mount_path": "/crypt-off", "driver": "Crypt",
+                       "addition": json.dumps(off_add), "order": 2})
+          check("boundary", "创建 /crypt-off（Thumbnail=false）", ok)
+          for d in ["/crypt-off/src", "/crypt-off/src/.thumbnails", "/crypt-off/dst"]:
+              mkdir(d)
+          upload("/crypt-off/src/off.png", PNG, "image/png")
+          upload("/crypt-off/src/.thumbnails/off.png.webp", WEBP_SRC, "image/webp")
+          ok, _ = api("POST", "/api/fs/move",
+                      {"src_dir": "/crypt-off/src", "dst_dir": "/crypt-off/dst", "names": ["off.png"]})
+          check("boundary", "Thumbnail=false 时移动主操作成功", ok)
+          check("boundary", "Thumbnail=false 时移动不产生同步（源 webp 仍在）",
+                "off.png.webp" in names("/crypt-off/src/.thumbnails"))
+          check("boundary", "Thumbnail=false 时目标目录未生成对应缩略图",
+                "off.png.webp" not in names("/crypt-off/dst/.thumbnails"))
+          main_cases_ok = all(flag for c, _, flag, _ in results if c != "boundary")
+          check("boundary", "ShowHidden 用默认值时同步逻辑不崩（主流程全绿）", main_cases_ok)
+
+          # ------------------------------------------------------------ 汇总
+          passed = sum(1 for _, _, ok, _ in results if ok)
+          for case, label, ok, detail in results:
+              if not ok:
+                  print("FAIL: %s - %s | %s" % (case, label, detail), flush=True)
+          print("TOTAL: %d/%d PASS" % (passed, len(results)), flush=True)
+          sys.exit(0 if passed == len(results) else 1)
+          PY
+
+      - name: 边界复跑（已有 Go 单测：路径规则 / 目录跳过 / Thumbnail 开关）
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./drivers/crypt/... -run 'TestThumbnail|TestShouldSyncThumbnail' -count=1 -v
+
+      - name: 运行 E2E 断言（移动/重命名/删除/复制 + 6 类场景）
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! curl -fsS --max-time 3 http://127.0.0.1:5244/ping > /dev/null; then
+            echo "服务端不可达，server.log 尾部："
+            tail -n 80 .e2e/server.log || true
+            exit 1
+          fi
+          python3 .e2e/e2e_check.py 2>&1 | tee .e2e/e2e_run.log
+
+      - name: 验收汇总（逐条 PASS）
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -E '^PASS:|^TOTAL:' .e2e/e2e_run.log
+
+      - name: 失败诊断（服务端日志最后 120 行）
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E 断言输出（最后 120 行）==="
+          tail -n 120 .e2e/e2e_run.log 2>/dev/null || true
+          echo "=== 服务端日志（最后 120 行）==="
+          tail -n 120 .e2e/server.log 2>/dev/null || true
+          echo "=== 关键断言关键字：PASS: / FAIL: / [crypt] thumbnail sync ==="
+          grep -E 'PASS:|FAIL:|\[crypt\] thumbnail sync' .e2e/e2e_run.log 2>/dev/null || true
+          exit 1

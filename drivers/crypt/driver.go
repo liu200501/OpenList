@@ -336,6 +336,7 @@ func (d *Crypt) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 	if err == nil {
 		d.refreshNameMapDir(stdpath.Dir(srcObj.GetPath()))
 		d.refreshNameMapDir(dstDir.GetPath())
+		d.syncThumbnailMove(ctx, srcObj, dstDir.GetPath(), false)
 	}
 	return err
 }
@@ -354,6 +355,7 @@ func (d *Crypt) Rename(ctx context.Context, srcObj model.Obj, newName string) er
 	err = op.Rename(ctx, remoteStorage, remoteActualPath, newEncryptedName)
 	if err == nil {
 		d.refreshNameMapDir(stdpath.Dir(srcObj.GetPath()))
+		d.syncThumbnailRename(ctx, srcObj, newName)
 	}
 	return err
 }
@@ -362,6 +364,7 @@ func (d *Crypt) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 	_, err := fs.Copy(ctx, srcObj.GetPath(), dstDir.GetPath())
 	if err == nil {
 		d.refreshNameMapDir(dstDir.GetPath())
+		d.syncThumbnailMove(ctx, srcObj, dstDir.GetPath(), true)
 	}
 	return err
 }
@@ -374,6 +377,7 @@ func (d *Crypt) Remove(ctx context.Context, obj model.Obj) error {
 	err = op.Remove(ctx, remoteStorage, remoteActualPath)
 	if err == nil {
 		d.refreshNameMapDir(stdpath.Dir(obj.GetPath()))
+		d.syncThumbnailRemove(ctx, obj)
 	}
 	return err
 }
