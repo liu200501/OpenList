@@ -30,6 +30,17 @@ concurrency:
 
 env:
   OPENLIST_ADMIN_PASSWORD: E2ePass123!
+  # 日志级别：显式声明测试期望 warn。源码事实（internal/conf/config.go:41-49）：
+  # LogConfig 只有 enable/name/max_* 字段，没有 level 字段；级别由 --debug/--dev 标志设置
+  # （internal/bootstrap/log.go:26-33），默认 InfoLevel 已经包含 Warn，因此 Warnf 一定落盘。
+  # 这里不使用 --debug（会额外开启 gin debug 路由），只用 --log-std 把日志镜像到 stdout。
+  OPENLIST_LOG_LEVEL: warn
+  # 关键修复：把 logrus 的 lumberjack 落盘文件固定为 .e2e/server.log。
+  # env 前缀见 internal/bootstrap/config.go:173-185（OPENLIST_）+ Log 段的 envPrefix "LOG_"
+  # + Name 字段的 env "NAME" => OPENLIST_LOG_NAME，在 config.json 之后覆盖（:98）。
+  # 不设置时 logrus 默认写 <data_dir>/log/log.log（internal/conf/config.go:147/175），
+  # 而上一版脚本读的 .e2e/server.log 只是 stdout 重定向，所以警告 count=0。
+  OPENLIST_LOG_NAME: ${{ github.workspace }}/.e2e/server.log
   E2E_DIR: .e2e
   E2E_BASE: http://127.0.0.1:5244
 
@@ -107,24 +118,37 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .e2e/data/localroot/enc .e2e/data/localroot/enc-off
-          # 输出全部重定向到文件，避免后台进程持有 step 的 stdout 导致 runner 等待。
-          nohup ./openlist-e2e server --data "$PWD/.e2e/data" > .e2e/server.log 2>&1 &
+          # .e2e/server.log 是 OPENLIST_LOG_NAME 指定的 logrus 真实落盘文件；
+          # stdout/stderr 单独重定向到 .e2e/server.stdout.log，避免两者争用同一路径。
+          # --log-std 让 logrus 同时写 stdout 与文件（internal/bootstrap/log.go:49），提供双通道。
+          # 上一版把 stdout 重定向到 .e2e/server.log，logrus 却写 <data>/log/log.log，
+          # 断言脚本读 stdout 文件自然读不到 [crypt] thumbnail sync 警告。
+          nohup ./openlist-e2e server --data "$PWD/.e2e/data" --log-std > .e2e/server.stdout.log 2>&1 &
           echo $! > .e2e/server.pid
+          ready=0
           for i in $(seq 1 90); do
             if curl -fsS --max-time 2 http://127.0.0.1:5244/ping | grep -q pong; then
               echo "PASS: setup - /ping 返回 200 pong（${i}s）"
-              exit 0
+              ready=1
+              break
             fi
             if ! kill -0 "$(cat .e2e/server.pid)" 2>/dev/null; then
               echo "服务端进程提前退出" >&2
-              tail -n 80 .e2e/server.log >&2
+              tail -n 80 .e2e/server.stdout.log .e2e/server.log >&2
               exit 1
             fi
             sleep 1
           done
-          echo "健康检查超时（90s）" >&2
-          tail -n 80 .e2e/server.log >&2
-          exit 1
+          if [ "$ready" != 1 ]; then
+            echo "健康检查超时（90s）" >&2
+            tail -n 80 .e2e/server.stdout.log .e2e/server.log >&2
+            exit 1
+          fi
+          # 真实日志通道自检：文件必须已由 logrus 创建且非空。
+          test -s .e2e/server.log
+          echo "PASS: setup - logrus 真实日志 $PWD/.e2e/server.log 已落盘（$(wc -l < .e2e/server.log) 行）"
+          echo "INFO: setup - warn 级别样例（启动阶段，允许为空）："
+          grep -a 'WARN\[' .e2e/server.log | head -3 || true
 
       - name: 首页由后端托管（embed 产物）
         shell: bash
@@ -144,6 +168,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           import sys
           import time
           import urllib.error
@@ -153,8 +178,23 @@ jobs:
           BASE = os.environ.get("E2E_BASE", "http://127.0.0.1:5244")
           E2E = os.environ.get("E2E_DIR", ".e2e")
           LOCALROOT = os.path.abspath(os.path.join(E2E, "data", "localroot"))
-          SERVER_LOG = os.path.join(E2E, "server.log")
           PASSWORD = os.environ.get("OPENLIST_ADMIN_PASSWORD", "E2ePass123!")
+
+          # 真实日志落盘路径：.e2e/server.log 由启动时的 OPENLIST_LOG_NAME 指定，是 logrus
+          # 的 lumberjack 文件；另外两个只作兜底（--log-std 的 stdout 副本、DefaultConfig
+          # 的 <data>/log/log.log）。断言只读文件，不读 step 标准输出。
+          LOG_FILES = [
+              os.path.join(E2E, "server.log"),
+              os.path.join(E2E, "server.stdout.log"),
+              os.path.join(E2E, "data", "log", "log.log"),
+          ]
+          # drivers/crypt/thumbnail.go:68 / :74 的实际 Warnf 格式串：
+          #   "[crypt] thumbnail sync: probe [%s] failed, skipped: %v"
+          #   "[crypt] thumbnail sync: %s [%s] failed: %v"
+          # 统一前缀取 "[crypt] thumbnail sync:"（含冒号），与实际输出逐字一致。
+          # 业务代码未改动，因此不引入 THUMBNAIL_SYNC_WARN: 之类的新前缀。
+          WARN_PREFIX = "[crypt] thumbnail sync:"
+          ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
           # 1x1 PNG 与两张不同的 1x1 WebP，全部内联，干净 runner 无需 ffmpeg / 素材文件。
           PNG = base64.b64decode(
@@ -173,6 +213,16 @@ jobs:
                   line += " | " + str(detail)
               print(line, flush=True)
               results.append((case, label, bool(ok), detail))
+
+
+          def check_items(case, label, items):
+              """逐项打印，失败时明确指出是哪一项没满足。items: [(名称, bool, 详情)]"""
+              for name, ok, detail in items:
+                  print("   [%s] %s%s" % (
+                      "OK" if ok else "MISS", name,
+                      (" | " + str(detail)) if detail else ""), flush=True)
+              bad = [name for name, ok, _ in items if not ok]
+              check(case, label, not bad, "未满足项=%s" % bad)
 
 
           def http(method, path, body=None, headers=None, timeout=60):
@@ -245,6 +295,52 @@ jobs:
 
           def names(path):
               return [o.get("name") for o in listing(path)]
+
+
+          def dir_state(path):
+              """列目录的原始结果：(HTTP 状态码, JSON code, [名称])。
+              目录不存在时 OpenList 返回 HTTP 200 + code=500 object not found，
+              这是正常响应，不应判 FAIL。"""
+              code, raw = http("POST", "/api/fs/list",
+                               {"path": path, "password": "", "page": 1,
+                                "per_page": 0, "refresh": True},
+                               {"Authorization": TOKEN})
+              try:
+                  j = json.loads(raw)
+              except Exception:
+                  j = {}
+              body_code = j.get("code") if isinstance(j, dict) else None
+              content = (j.get("data", {}) or {}).get("content", []) or [] if isinstance(j, dict) else []
+              return code, body_code, [o.get("name") for o in content], str(j.get("message", ""))
+
+
+          def get_obj(path):
+              """取单个对象元数据，用来判断某路径仍是普通文件（is_dir=false）。"""
+              code, raw = http("GET", "/api/fs/get?path=" + urllib.parse.quote(path, safe=""),
+                               headers={"Authorization": TOKEN})
+              try:
+                  j = json.loads(raw)
+              except Exception:
+                  j = {}
+              data = (j.get("data") or {}) if isinstance(j, dict) else {}
+              return code, (j.get("code") if isinstance(j, dict) else None), data
+
+
+          def read_warns():
+              """从真实日志文件读同步警告，返回 (命中行, 每个文件的诊断信息)。
+              logrus 开了 ForceColors，日志里带 ANSI 转义，先剥掉再匹配。"""
+              hits, diag = [], []
+              for path in LOG_FILES:
+                  if not os.path.exists(path):
+                      diag.append("%s=MISSING" % path)
+                      continue
+                  with open(path, "r", encoding="utf-8", errors="replace") as f:
+                      lines = ANSI.sub("", f.read()).splitlines()
+                  found = [l for l in lines if WARN_PREFIX in l and "failed" in l]
+                  diag.append("%s=%d行/%d命中/%d字节" % (
+                      path, len(lines), len(found), os.path.getsize(path)))
+                  hits.extend(found)
+              return hits, "; ".join(diag)
 
 
           def thumb_of(path, name):
@@ -421,18 +517,40 @@ jobs:
                 upload("/crypt/dst3/.thumbnails", b"block", "text/plain"))
           ok, _ = api("POST", "/api/fs/move",
                       {"src_dir": "/crypt/src3", "dst_dir": "/crypt/dst3", "names": ["fail.png"]})
-          check("failure", "主操作成功（缩略图同步失败不回滚）", ok)
-          check("failure", "主文件仍到位", wait_for("/crypt/dst3", "fail.png"))
-          logtxt = ""
-          if os.path.exists(SERVER_LOG):
-              with open(SERVER_LOG, "r", encoding="utf-8", errors="replace") as f:
-                  logtxt = f.read()
-          warns = [l for l in logtxt.splitlines()
-                   if "[crypt] thumbnail sync" in l and "failed" in l]
-          check("failure", "日志出现 [crypt] thumbnail sync 警告", len(warns) > 0,
-                "count=%d" % len(warns))
+          check("failure", "主操作成功（缩略图同步失败不回滚）", ok, "POST /api/fs/move")
+          check("failure", "主文件仍到位", wait_for("/crypt/dst3", "fail.png"),
+                "dst3=%s" % names("/crypt/dst3"))
+
+          # 可观测副作用（不依赖日志文本）：同步在 fs.MakeDir 失败处 return，
+          # 源 webp 不会被搬走；目标 .thumbnails 仍是占位的普通文件（b"block"，5 字节）。
+          src_still = "fail.png.webp" in names("/crypt/src3/.thumbnails")
+          gc, gcode, gdata = get_obj("/crypt/dst3/.thumbnails")
+          blocker_ok = (gc == 200 and gcode == 200
+                        and gdata.get("is_dir") is False
+                        and gdata.get("size") == len(b"block"))
+          check_items("failure", "同步失败留下可观测副作用（标记文件 + 源缩略图残留）", [
+              ("源 .thumbnails/fail.png.webp 仍在", src_still,
+               "src3/.thumbnails=%s" % names("/crypt/src3/.thumbnails")),
+              ("目标 .thumbnails 仍是普通文件（占位标记未被换成目录）", blocker_ok,
+               "HTTP %s code=%s is_dir=%s size=%s" % (
+                   gc, gcode, gdata.get("is_dir"), gdata.get("size"))),
+          ])
+
+          # 日志断言：只读 OPENLIST_LOG_NAME 指定的真实日志文件（含两个兜底路径），
+          # 前缀与 drivers/crypt/thumbnail.go:68/:74 的 Warnf 格式串逐字一致。
+          warns, logdiag = [], ""
+          for _ in range(10):
+              warns, logdiag = read_warns()
+              if warns:
+                  break
+              time.sleep(0.5)
+          check("failure", "日志出现 [crypt] thumbnail sync 警告（读 .e2e/server.log）",
+                len(warns) > 0, "count=%d; %s" % (len(warns), logdiag))
           for l in warns[-3:]:
               print("   LOG: " + l[:300], flush=True)
+          if not warns:
+              print("   DIAG: 日志通道仍未命中；上方两项可观测副作用已单独断言，本条按严格日志断言判 FAIL",
+                    flush=True)
 
           # ------------------------------------------------------------ 9. 整目录移动不回归
           check("dir", "上传 dirsrc/inner.png", upload("/crypt/dirsrc/inner.png", PNG, "image/png"))
@@ -449,25 +567,68 @@ jobs:
 
           # ------------------------------------------------------------ 10. 边界
           # Thumbnail 开关关闭：不应产生任何同步。
+          # ShowHidden 不显式传入（沿用创建时的默认语义）。注意：API 创建存储时
+          # addition 直接反序列化进 Addition 结构体（internal/op/storage.go:110），
+          # meta.go 的 default:"true" 只是 WebUI 表单元数据（internal/op/driver.go:203），
+          # 服务端不会自动补字段；因此所有断言都使用显式 .thumbnails 路径，不依赖隐藏目录可见性。
           off_add = dict(crypt_add)
           off_add.update({"thumbnail": False, "remote_path": "/local/enc-off"})
           ok, _ = api("POST", "/api/admin/storage/create",
                       {"mount_path": "/crypt-off", "driver": "Crypt",
                        "addition": json.dumps(off_add), "order": 2})
-          check("boundary", "创建 /crypt-off（Thumbnail=false）", ok)
-          for d in ["/crypt-off/src", "/crypt-off/src/.thumbnails", "/crypt-off/dst"]:
-              mkdir(d)
-          upload("/crypt-off/src/off.png", PNG, "image/png")
-          upload("/crypt-off/src/.thumbnails/off.png.webp", WEBP_SRC, "image/webp")
+          check("boundary", "创建 /crypt-off（Thumbnail=false，ShowHidden 不显式设置）", ok)
+
+          off_dirs = ["/crypt-off/src", "/crypt-off/src/.thumbnails", "/crypt-off/dst"]
+          bad_dirs = [d for d in off_dirs if not mkdir(d)]
+          check("boundary", "创建 /crypt-off 目录树", not bad_dirs, "未满足项=%s" % bad_dirs)
+          up1 = upload("/crypt-off/src/off.png", PNG, "image/png")
+          up2 = upload("/crypt-off/src/.thumbnails/off.png.webp", WEBP_SRC, "image/webp")
+          check("boundary", "上传主文件与源缩略图", up1 and up2,
+                "主文件=%s, 源webp=%s" % (up1, up2))
+
           ok, _ = api("POST", "/api/fs/move",
                       {"src_dir": "/crypt-off/src", "dst_dir": "/crypt-off/dst", "names": ["off.png"]})
-          check("boundary", "Thumbnail=false 时移动主操作成功", ok)
-          check("boundary", "Thumbnail=false 时移动不产生同步（源 webp 仍在）",
-                "off.png.webp" in names("/crypt-off/src/.thumbnails"))
-          check("boundary", "Thumbnail=false 时目标目录未生成对应缩略图",
-                "off.png.webp" not in names("/crypt-off/dst/.thumbnails"))
-          main_cases_ok = all(flag for c, _, flag, _ in results if c != "boundary")
-          check("boundary", "ShowHidden 用默认值时同步逻辑不崩（主流程全绿）", main_cases_ok)
+          check("boundary", "Thumbnail=false 时主操作 200", ok, "POST /api/fs/move")
+          off_main_ok = wait_for("/crypt-off/dst", "off.png")
+          check("boundary", "Thumbnail=false 时主文件到位 /crypt-off/dst/off.png", off_main_ok,
+                "dst 列表=%s" % names("/crypt-off/dst"))
+          off_src_kept = "off.png.webp" in names("/crypt-off/src/.thumbnails")
+          check("boundary", "Thumbnail=false 时源 .thumbnails/off.png.webp 仍在", off_src_kept,
+                "src/.thumbnails 列表=%s" % names("/crypt-off/src/.thumbnails"))
+
+          # 对 POST /api/fs/list -> 500 object not found 的明确预期：
+          # /crypt-off/dst/.thumbnails 从未被创建（Thumbnail=false 不产生同步），
+          # 所以 OpenList 返回 HTTP 200 + code=500 "object not found" 是正常结果，不判 FAIL。
+          # 若返回 code=200，则必须是空列表；其它形状单列为待查项（NOTE），不并入 FAIL。
+          lc, lbody, lnames, lmsg = dir_state("/crypt-off/dst/.thumbnails")
+          no_new_webp = "off.png.webp" not in lnames
+          if lc == 200 and lbody == 500 and "object not found" in lmsg:
+              print("   NOTE: 目标 .thumbnails 目录本就不存在，list code=500 object not found 属预期（不判 FAIL）",
+                    flush=True)
+          elif lc == 200 and lbody == 200:
+              print("   NOTE: 目标 .thumbnails 返回 200，names=%s；按空列表语义核对" % lnames, flush=True)
+          else:
+              print("   NOTE: 待查项 - 目标 .thumbnails list 形状异常 HTTP %s code=%s msg=%s" % (
+                  lc, lbody, lmsg[:160]), flush=True)
+          check("boundary", "Thumbnail=false 时目标目录无新 webp", no_new_webp,
+                "HTTP %s, code=%s, names=%s" % (lc, lbody, lnames))
+
+          # 「ShowHidden 用默认值时同步逻辑不崩」拆成具体、互相独立的断言，
+          # 不再用 all(其它 case 结果) 这种会把 failure 的失败传染过来的聚合断言。
+          ping_code, _ = http("GET", "/ping")
+          c1, b1, n1, _ = dir_state("/crypt")
+          c2, b2, n2, _ = dir_state("/crypt/dst")
+          c3, b3, n3, _ = dir_state("/crypt/dst/.thumbnails")
+          c4, b4, n4, _ = dir_state("/crypt-off")
+          check_items("boundary", "ShowHidden 用默认值时同步逻辑不崩（5 项具体断言）", [
+              ("GET /ping 200", ping_code == 200, "HTTP %s" % ping_code),
+              ("/crypt 挂载 list 200", c1 == 200 and b1 == 200, "HTTP %s code=%s" % (c1, b1)),
+              ("/crypt/dst 主文件 photo.png 仍在", "photo.png" in n2, "names=%s" % n2),
+              ("/crypt/dst/.thumbnails 含 photo.png.webp",
+               c3 == 200 and b3 == 200 and "photo.png.webp" in n3,
+               "HTTP %s code=%s names=%s" % (c3, b3, n3)),
+              ("/crypt-off 挂载 list 200", c4 == 200 and b4 == 200, "HTTP %s code=%s" % (c4, b4)),
+          ])
 
           # ------------------------------------------------------------ 汇总
           passed = sum(1 for _, _, ok, _ in results if ok)
@@ -508,8 +669,12 @@ jobs:
         run: |
           echo "=== E2E 断言输出（最后 120 行）==="
           tail -n 120 .e2e/e2e_run.log 2>/dev/null || true
-          echo "=== 服务端日志（最后 120 行）==="
+          echo "=== logrus 真实日志 .e2e/server.log（最后 120 行）==="
           tail -n 120 .e2e/server.log 2>/dev/null || true
-          echo "=== 关键断言关键字：PASS: / FAIL: / [crypt] thumbnail sync ==="
-          grep -E 'PASS:|FAIL:|\[crypt\] thumbnail sync' .e2e/e2e_run.log 2>/dev/null || true
+          echo "=== stdout 副本 .e2e/server.stdout.log（最后 120 行）==="
+          tail -n 120 .e2e/server.stdout.log 2>/dev/null || true
+          echo "=== 关键断言关键字：PASS: / FAIL: / NOTE: / [crypt] thumbnail sync ==="
+          grep -E 'PASS:|FAIL:|NOTE:|\[crypt\] thumbnail sync' .e2e/e2e_run.log 2>/dev/null || true
+          echo "=== 真实日志里的同步警告（最后 10 行）==="
+          grep -a '\[crypt\] thumbnail sync' .e2e/server.log 2>/dev/null | tail -n 10 || true
           exit 1
