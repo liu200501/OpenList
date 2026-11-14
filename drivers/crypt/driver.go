@@ -18,7 +18,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
-	"github.com/OpenListTeam/OpenList/v4/internal/sign"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -113,7 +112,13 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 		return nil, err
 	}
 
+	hasReqPath := strings.HasPrefix(args.ReqPath, "/")
+	thumbEnabled := d.Thumbnail && hasReqPath
+	folderThumbEnabled := d.FolderThumbnail && hasReqPath
+	apiURL := common.GetApiUrl(ctx)
+
 	result := make([]model.Obj, 0, len(objs))
+	folderTargets := make([]folderThumbTarget, 0)
 	for _, obj := range objs {
 		size := obj.GetSize()
 		mask := model.GetObjMask(obj)
@@ -151,21 +156,32 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 			Mask:     mask &^ model.Temp,
 			// discarding hash as it's encrypted
 		}
-		if !d.Thumbnail || !strings.HasPrefix(args.ReqPath, "/") {
+		if !thumbEnabled && !(folderThumbEnabled && objRes.IsFolder) {
 			result = append(result, objRes)
 			continue
 		}
-		thumbPath := stdpath.Join(args.ReqPath, ".thumbnails", name+".webp")
-		thumb := fmt.Sprintf("%s/d%s?sign=%s",
-			common.GetApiUrl(ctx),
-			utils.EncodePath(thumbPath, true),
-			sign.Sign(thumbPath))
-		result = append(result, &model.ObjThumb{
-			Object: *objRes,
-			Thumbnail: model.Thumbnail{
-				Thumbnail: thumb,
-			},
-		})
+		var thumb string
+		if thumbEnabled {
+			thumbPath := stdpath.Join(args.ReqPath, thumbnailDirName, name+thumbnailExt)
+			thumb = signedDownURL(apiURL, thumbPath)
+		}
+		objThumb := &model.ObjThumb{
+			Object:    *objRes,
+			Thumbnail: model.Thumbnail{Thumbnail: thumb},
+		}
+		result = append(result, objThumb)
+		if folderThumbEnabled && objRes.IsFolder {
+			folderTargets = append(folderTargets, folderThumbTarget{
+				thumb:         objThumb,
+				dirRemotePath: objRes.Path,
+				folderName:    name,
+			})
+		}
+	}
+
+	if len(folderTargets) > 0 {
+		d.fillFolderThumbnails(ctx, apiURL, args.ReqPath, remoteFullPath,
+			thumbEnabled, args.Refresh, folderTargets)
 	}
 
 	// 记录明文名与云盘上密文名的对应关系，供对照页展示（异步落盘、自动防抖）

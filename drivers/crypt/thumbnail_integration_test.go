@@ -42,9 +42,6 @@ func newThumbnailFixture(t *testing.T) *thumbnailFixture {
 		}
 		db.Init(g)
 	})
-	oldConf := conf.Conf
-	conf.Conf = conf.DefaultConfig(t.TempDir())
-	t.Cleanup(func() { conf.Conf = oldConf })
 	if err := os.MkdirAll(conf.Conf.TempDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

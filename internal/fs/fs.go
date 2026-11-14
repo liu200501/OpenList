@@ -22,6 +22,8 @@ type ListArgs struct {
 	Refresh            bool
 	NoLog              bool
 	WithStorageDetails bool
+	// SkipHook 用于内部探测式的列目录：不触发对象更新 hook（搜索索引、strm 等）。
+	SkipHook bool
 }
 
 func List(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error) {

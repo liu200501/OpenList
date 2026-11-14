@@ -18,9 +18,18 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// 正常运行由 bootstrap 初始化全局配置，这里只需要一个临时目录
+	// 正常运行由 bootstrap 初始化全局配置，这里只需要在所有测试开始前
+	// 一次性给定临时目录。namemap 的定时落盘 goroutine 会读 conf.Conf，
+	// 若测试中途改写它就会形成数据竞争，因此整个进程生命周期内不再写回。
 	if conf.Conf == nil {
-		conf.Conf = &conf.Config{TempDir: os.TempDir()}
+		root, err := os.MkdirTemp("", "openlist-crypt-test-")
+		if err != nil {
+			panic(err)
+		}
+		conf.Conf = conf.DefaultConfig(root)
+		if err := os.MkdirAll(conf.Conf.TempDir, 0o755); err != nil {
+			panic(err)
+		}
 	}
 	os.Exit(m.Run())
 }

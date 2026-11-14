@@ -17,6 +17,10 @@ type Addition struct {
 
 	Thumbnail bool `json:"thumbnail" required:"true" default:"false" help:"启用缩略图（缩略图需预先生成在 .thumbnails 目录下）"`
 
+	// FolderThumbnail 让文件夹图标直接显示「文件夹内按名称排序的第一张图片」。
+	// 与 Thumbnail 相互独立：关闭 Thumbnail 时文件夹封面依然生效，只是不读预生成 webp。
+	FolderThumbnail bool `json:"folder_thumbnail" required:"false" default:"false" help:"用文件夹内第一张图片作为文件夹缩略图（每个子文件夹额外列一次目录并探测预生成缩略图；单次列目录最多处理 50 个文件夹）"`
+
 	// 用「禁用」而不是「启用」：老配置的 addition JSON 里没有这个 key，
 	// 反序列化后为 false，正好保持原有的「支持暂停」行为。
 	DisableResumable bool `json:"disable_resumable_upload" default:"false" help:"关闭上传的暂停/继续：不再把密文预先写入临时目录，上传中断后必须从头开始"`

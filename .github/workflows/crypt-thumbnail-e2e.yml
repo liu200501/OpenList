@@ -14,6 +14,8 @@
 # crypt 缩略图语义（drivers/crypt/meta.go:18）：缩略图需「预先生成在 .thumbnails 目录下」，
 # crypt 的 List 只按 <当前目录>/.thumbnails/<明文文件名>.webp 拼签名 URL，不会自动生成 webp。
 # 所以 E2E 先上传 PNG 主文件，再把 WebP 上传到同名 .thumbnails 目录，然后断言 thumb URL 返回 200。
+# 另有 folder_thumbnail：目录对象的 thumb 指向「文件夹内按明文名排序的第一张图片」，
+# URL 仍是明文虚拟路径，由 crypt.Get 逐段加密、crypt.Link 解密，E2E 断言 GET 结果等于上传原图字节。
 # 5244 是 HTTP 端口，5246 是 S3 端口（config.json 的 s3.port），本工作流只监听 5244。
 
 name: Crypt Thumbnail E2E
@@ -630,6 +632,90 @@ jobs:
               ("/crypt-off 挂载 list 200", c4 == 200 and b4 == 200, "HTTP %s code=%s" % (c4, b4)),
           ])
 
+          # ------------------------------------------- 9. 文件夹封面（首图）
+          # folder_thumbnail=true 时，目录对象也带 thumb：指向文件夹内按明文名
+          # 排序的第一张图片。URL 是明文虚拟路径，/d 会经 crypt.Get 逐段加密、
+          # crypt.Link 解密，因此 GET 结果必须等于上传的原图字节。
+          def cover_add(remote, thumbnail):
+              return {
+                  "filename_encryption": "standard",
+                  "directory_name_encryption": "true",
+                  "remote_path": remote,
+                  "password": "E2eCoverPass123",
+                  "salt": "E2eCoverSalt123",
+                  "encrypted_suffix": ".bin",
+                  "filename_encoding": "base64",
+                  "thumbnail": thumbnail,
+                  "folder_thumbnail": True,
+                  "show_hidden": True,
+                  "name_map_scan": False,
+                  "disable_resumable_upload": True,
+              }
+
+          ok, _ = api("POST", "/api/admin/storage/create",
+                      {"mount_path": "/crypt-cover", "driver": "Crypt",
+                       "addition": json.dumps(cover_add("/local/coverencA", False)), "order": 2})
+          check("folder_cover", "创建 Crypt /crypt-cover（folder_thumbnail=true, thumbnail=false）", ok)
+          ok, _ = api("POST", "/api/admin/storage/create",
+                      {"mount_path": "/crypt-cover2", "driver": "Crypt",
+                       "addition": json.dumps(cover_add("/local/coverencB", True)), "order": 3})
+          check("folder_cover", "创建 Crypt /crypt-cover2（folder_thumbnail=true, thumbnail=true）", ok)
+
+          cover_ready = {}
+          for _ in range(40):
+              _, sj = api("GET", "/api/admin/storage/list")
+              sl = ((sj or {}).get("data") or {}).get("content") or []
+              cover_ready = {s.get("mount_path"): s.get("status") for s in sl}
+              if cover_ready.get("/crypt-cover") == "work" and cover_ready.get("/crypt-cover2") == "work":
+                  break
+              time.sleep(0.5)
+          check("folder_cover", "两个封面存储 status=work",
+                cover_ready.get("/crypt-cover") == "work" and cover_ready.get("/crypt-cover2") == "work",
+                str(cover_ready))
+
+          # 故意先传 z.jpg 再传 a.jpg：底层按密文名排序，功能必须按明文名选 a.jpg。
+          cover_items = [
+              ("mkdir /crypt-cover/album", mkdir("/crypt-cover/album"), ""),
+              ("上传 z.jpg", upload("/crypt-cover/album/z.jpg", WEBP_STALE, "image/jpeg"), ""),
+              ("上传 a.jpg", upload("/crypt-cover/album/a.jpg", PNG, "image/jpeg"), ""),
+              ("上传非图片 note.txt", upload("/crypt-cover/album/note.txt", b"hello", "text/plain"), ""),
+          ]
+          cover_url = thumb_of("/crypt-cover", "album")
+          cover_items.append(("目录 thumb 指向明文名首图 a.jpg",
+                              "/crypt-cover/album/a.jpg?sign=" in cover_url, cover_url))
+          cv_code, cv_body = get_bytes(cover_url) if cover_url else (0, b"")
+          cover_items.append(("GET 封面 URL 200 且字节等于上传原图",
+                              cv_code == 200 and cv_body == PNG,
+                              "HTTP %s, %d bytes" % (cv_code, len(cv_body))))
+          check_items("folder_cover", "文件夹封面取首图（不依赖密文名顺序，6 项具体断言）", cover_items)
+
+          # thumbnail=true 时优先用首图自己的预生成 WebP；父目录下显式生成的
+          # <文件夹名>.webp 优先级更高，不应被首图覆盖。
+          webp_items = [
+              ("mkdir /crypt-cover2/album", mkdir("/crypt-cover2/album"), ""),
+              ("mkdir /crypt-cover2/album/.thumbnails", mkdir("/crypt-cover2/album/.thumbnails"), ""),
+              ("上传 a.jpg", upload("/crypt-cover2/album/a.jpg", PNG, "image/jpeg"), ""),
+              ("上传 a.jpg.webp", upload("/crypt-cover2/album/.thumbnails/a.jpg.webp", WEBP_SRC, "image/webp"), ""),
+          ]
+          webp_url = thumb_of("/crypt-cover2", "album")
+          webp_items.append(("目录 thumb 指向首图的预生成 WebP",
+                             "/crypt-cover2/album/.thumbnails/a.jpg.webp?sign=" in webp_url, webp_url))
+          wv_code, wv_body = get_bytes(webp_url) if webp_url else (0, b"")
+          webp_items.append(("GET WebP 封面 200 且字节一致",
+                             wv_code == 200 and wv_body == WEBP_SRC,
+                             "HTTP %s, %d bytes" % (wv_code, len(wv_body))))
+          webp_items.append(("mkdir /crypt-cover2/.thumbnails", mkdir("/crypt-cover2/.thumbnails"), ""))
+          webp_items.append(("上传显式封面 album.webp",
+                             upload("/crypt-cover2/.thumbnails/album.webp", WEBP_STALE, "image/webp"), ""))
+          explicit_url = thumb_of("/crypt-cover2", "album")
+          webp_items.append(("显式封面优先，thumb 改指父目录 album.webp",
+                             "/crypt-cover2/.thumbnails/album.webp?sign=" in explicit_url, explicit_url))
+          ev_code, ev_body = get_bytes(explicit_url) if explicit_url else (0, b"")
+          webp_items.append(("GET 显式封面 200 且字节一致",
+                             ev_code == 200 and ev_body == WEBP_STALE,
+                             "HTTP %s, %d bytes" % (ev_code, len(ev_body))))
+          check_items("folder_cover", "预生成 WebP 与显式封面的优先级（10 项具体断言）", webp_items)
+
           # ------------------------------------------------------------ 汇总
           passed = sum(1 for _, _, ok, _ in results if ok)
           for case, label, ok, detail in results:
@@ -639,13 +725,13 @@ jobs:
           sys.exit(0 if passed == len(results) else 1)
           PY
 
-      - name: 边界复跑（已有 Go 单测：路径规则 / 目录跳过 / Thumbnail 开关）
+      - name: 边界复跑（Go 单测：缩略图同步 / 文件夹封面选图规则）
         shell: bash
         run: |
           set -euo pipefail
-          go test ./drivers/crypt/... -run 'TestThumbnail|TestShouldSyncThumbnail' -count=1 -v
+          go test ./drivers/crypt/... -run 'TestThumbnail|TestShouldSyncThumbnail|TestFolderThumb|TestIsFolderThumbImage|TestFirstFolderThumbImage' -count=1 -v
 
-      - name: 运行 E2E 断言（移动/重命名/删除/复制 + 6 类场景）
+      - name: 运行 E2E 断言（移动/重命名/删除/复制 + 文件夹封面 + 6 类场景）
         shell: bash
         run: |
           set -euo pipefail

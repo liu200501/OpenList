@@ -28,6 +28,7 @@ func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 			ReqPath:            path,
 			Refresh:            args.Refresh,
 			WithStorageDetails: args.WithStorageDetails,
+			SkipHook:           args.SkipHook,
 		})
 		if err != nil {
 			if !args.NoLog {
