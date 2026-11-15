@@ -994,6 +994,10 @@ func getPersonalTime(t string) time.Time {
 func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 	files := make([]model.Obj, 0)
 	nextPageCursor := ""
+	// ★ 本次进入目录时，累加所有分页中「直接子文件」的 size，
+	// 循环结束后一次性强制覆盖写缓存（以当前父目录 fileId 为 key）。
+	var dirSize int64
+	loadDirSizeCacheOnce()
 	for {
 		data := base.Json{
 			"imageThumbnailStyleList": []string{"Small", "Large"},
@@ -1013,12 +1017,15 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 		nextPageCursor = resp.Data.NextPageCursor
 		for _, item := range resp.Data.Items {
 			isFolder := (item.Type == "folder")
+			if !isFolder {
+				dirSize += item.Size
+			}
 			var f model.Obj
 			if isFolder {
 				f = &model.Object{
 					ID:       item.FileId,
 					Name:     item.Name,
-					Size:     0,
+					Size:     getDirSize(item.FileId),
 					Modified: getPersonalTime(item.UpdatedAt),
 					Ctime:    getPersonalTime(item.CreatedAt),
 					IsFolder: isFolder,
@@ -1071,6 +1078,8 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 			break
 		}
 	}
+	// 每次进目录都用最新列表重新计算并覆盖，空目录也会把旧值清零。
+	setDirSize(fileId, dirSize)
 	return files, nil
 }
 
