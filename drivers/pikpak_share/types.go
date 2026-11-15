@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	log "github.com/sirupsen/logrus"
 )
 
 type ShareResp struct {
@@ -17,6 +18,14 @@ type ShareResp struct {
 	PassCodeToken   string `json:"pass_code_token"`
 }
 
+// Params carries the folder summary returned by share/detail for drive#folder
+// items. Unlike the top-level "size" (always "0" for folders), "total_size" is
+// the recursive size of the folder in bytes, encoded as a decimal string.
+type Params struct {
+	TotalCount string `json:"total_count"`
+	TotalSize  string `json:"total_size"`
+}
+
 type File struct {
 	Id             string    `json:"id"`
 	ShareId        string    `json:"share_id"`
@@ -24,20 +33,40 @@ type File struct {
 	Name           string    `json:"name"`
 	ModifiedTime   time.Time `json:"modified_time"`
 	Size           string    `json:"size"`
+	Params         Params    `json:"params"`
 	ThumbnailLink  string    `json:"thumbnail_link"`
 	WebContentLink string    `json:"web_content_link"`
 	Medias         []Media   `json:"medias"`
 }
 
+func parseSize(raw string, field, name string) int64 {
+	if raw == "" {
+		return 0
+	}
+	size, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		log.Debugf("[pikpak_share] failed to parse %s %q for %q: %v", field, raw, name, err)
+		return 0
+	}
+	return size
+}
+
 func fileToObj(f File) *model.ObjThumb {
-	size, _ := strconv.ParseInt(f.Size, 10, 64)
+	isFolder := f.Kind == "drive#folder"
+	size := parseSize(f.Size, "size", f.Name)
+	if isFolder {
+		// folders report size "0"; params.total_size holds the recursive size
+		if total := parseSize(f.Params.TotalSize, "params.total_size", f.Name); total > 0 {
+			size = total
+		}
+	}
 	return &model.ObjThumb{
 		Object: model.Object{
 			ID:       f.Id,
 			Name:     f.Name,
 			Size:     size,
 			Modified: f.ModifiedTime,
-			IsFolder: f.Kind == "drive#folder",
+			IsFolder: isFolder,
 		},
 		Thumbnail: model.Thumbnail{
 			Thumbnail: f.ThumbnailLink,
