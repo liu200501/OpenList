@@ -158,6 +158,11 @@ type PersonalFileItem struct {
 	CreatedAt  string              `json:"createdAt"`
 	UpdatedAt  string              `json:"updatedAt"`
 	Thumbnails []PersonalThumbnail `json:"thumbnailUrls"`
+	// mediaMetaInfo 是 /file/list 对视频条目下发的媒体元信息。
+	// duration 单位为秒、字符串形式（例如 "2082.369000"）。
+	MediaMetaInfo struct {
+		Duration string `json:"duration"`
+	} `json:"mediaMetaInfo"`
 }
 
 type PersonalListResp struct {

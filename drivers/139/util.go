@@ -1052,6 +1052,19 @@ func (d *Yun139) personalGetFiles(fileId string) ([]model.Obj, error) {
 					Thumbnail: model.Thumbnail{Thumbnail: ThumbnailUrl},
 				}
 			}
+			// ★ /file/list 的 mediaMetaInfo.duration 直接给出视频时长（秒），
+			// 顺手写入持久化缓存并附加到对象，列表当次即可显示，无需额外请求。
+			// 复用 parseShareExtDuration（字符串秒的通用解析），解析失败时保持原样，
+			// Link 里的 fetchVideoDuration 仍可作兜底。
+			if !isFolder && isVideoFile(item.Name) {
+				if dur := parseShareExtDuration(item.MediaMetaInfo.Duration); dur > 0 {
+					setPersistDuration(item.FileId, dur)
+					f = attachDuration(f, dur)
+				} else if item.MediaMetaInfo.Duration != "" {
+					log.Debugf("[139] failed to parse mediaMetaInfo.duration %q for %s",
+						item.MediaMetaInfo.Duration, item.Name)
+				}
+			}
 			files = append(files, f)
 		}
 		if len(nextPageCursor) == 0 {
