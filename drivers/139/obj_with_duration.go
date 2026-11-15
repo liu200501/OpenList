@@ -19,6 +19,8 @@ func (o *objWithDuration) GetDuration() float64 {
 	return o.duration
 }
 
+func (o *objWithDuration) Unwrap() model.Obj { return o.Obj }
+
 // 为了不丢失原有的 ObjThumb 能力，把关键接口也转发一遍
 func (o *objWithDuration) GetName() string          { return o.Obj.GetName() }
 func (o *objWithDuration) GetSize() int64           { return o.Obj.GetSize() }
@@ -28,6 +30,10 @@ func (o *objWithDuration) CreateTime() time.Time    { return o.Obj.CreateTime() 
 func (o *objWithDuration) GetHash() utils.HashInfo  { return o.Obj.GetHash() }
 func (o *objWithDuration) GetID() string            { return o.Obj.GetID() }
 func (o *objWithDuration) GetPath() string          { return o.Obj.GetPath() }
+func (o *objWithDuration) Thumb() string {
+	thumb, _ := model.GetThumb(o.Obj)
+	return thumb
+}
 
 // attachDuration 把时长附加到 obj 上。
 // 如果 obj 已经是 objWithDuration，直接更新；否则包一层。

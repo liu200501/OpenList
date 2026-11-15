@@ -224,6 +224,11 @@ type ShareListResp struct {
 type ShareContentInfo struct {
 	PresentURL  string `json:"presentURL"`
 	DownloadURL string `json:"cdnDownLoadUrl"`
+	// extInfo 是分享盘详情接口返回的视频元信息，duration 单位为秒。
+	// 抓包样例为 "1473.471000"，故用 string 接收，避免类型不匹配导致反序列化失败。
+	ExtInfo struct {
+		Duration string `json:"duration"`
+	} `json:"extInfo"`
 }
 
 type ShareDownloadResp struct {

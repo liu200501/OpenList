@@ -207,9 +207,9 @@ func (d *Yun139) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 	}
 
 	// ★ 用持久化缓存填时长（只读缓存，不请求 139）
-	if d.Addition.Type == MetaPersonalNew {
+	if d.Addition.Type == MetaPersonalNew || d.isShare() {
 		loadDurationCacheOnce()
-		for _, obj := range objs {
+		for i, obj := range objs {
 			if obj.IsDir() {
 				continue
 			}
@@ -217,7 +217,7 @@ func (d *Yun139) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 				continue
 			}
 			if dur := getPersistDuration(obj.GetID()); dur > 0 {
-				attachDuration(obj, dur)
+				objs[i] = attachDuration(obj, dur)
 			}
 		}
 	}
@@ -242,14 +242,14 @@ func (d *Yun139) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		url, err = d.groupGetLink(file.GetID(), file.GetPath())
 	case MetaShare:
 		if refs, ok := decodeShareRefs(file.GetID()); ok && len(refs) > 0 {
-			return d.shareGetLinkWithRef(refs[0], refs[0].NodeID, args.Type)
+			return d.shareGetLinkWithRef(refs[0], refs[0].NodeID, args.Type, file.GetID())
 		}
 		fallbackRef := shareRef{LinkID: d.LinkID, NodeID: "root"}
 		if entries := d.shareEntries(); len(entries) > 0 {
 			fallbackRef.LinkID = entries[0].LinkID
 			fallbackRef.Password = entries[0].Password
 		}
-		return d.shareGetLinkWithRef(fallbackRef, file.GetID(), args.Type)
+		return d.shareGetLinkWithRef(fallbackRef, file.GetID(), args.Type, file.GetID())
 	default:
 		return nil, errs.NotImplement
 	}

@@ -765,7 +765,23 @@ func (d *Yun139) shareGetObj(reqPath string) (model.Obj, error) {
 	return currentObj, nil
 }
 
-func (d *Yun139) shareGetLinkWithRef(ref shareRef, coID string, linkType string) (*model.Link, error) {
+// parseShareExtDuration 解析分享盘详情 extInfo.duration（字符串秒）。
+// 空值表示接口未下发，不记日志；非法值记 Debug 后返回 0。
+func parseShareExtDuration(raw string) float64 {
+	if raw == "" {
+		return 0
+	}
+	dur, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(dur) || math.IsInf(dur, 0) || dur <= 0 {
+		return 0
+	}
+	return dur
+}
+
+// shareGetLinkWithRef 获取分享文件下载链接。
+// cacheKey 与 List 中 obj.GetID() 保持一致，用于持久化视频时长缓存；
+// coID 是请求参数 contentId，两者在 fallback 分支取值相同但职责不同。
+func (d *Yun139) shareGetLinkWithRef(ref shareRef, coID, linkType, cacheKey string) (*model.Link, error) {
 	data := base.Json{
 		"getContentInfoFromOutLinkReq": base.Json{
 			"contentId": coID,
@@ -780,17 +796,37 @@ func (d *Yun139) shareGetLinkWithRef(ref shareRef, coID string, linkType string)
 		return nil, err
 	}
 
+	// ★ 详情响应 data.contentInfo.extInfo.duration 直接给出视频时长（秒），
+	// 不再需要解析 m3u8 或额外请求 /videoPreview/getPreviewInfo。
+	dur := parseShareExtDuration(resp.Data.ContentInfo.ExtInfo.Duration)
+	if dur > 0 {
+		setPersistDuration(cacheKey, dur)
+		log.Debugf("[139Share] extInfo duration for %s: %.3f s", coID, dur)
+	} else if resp.Data.ContentInfo.ExtInfo.Duration != "" {
+		log.Debugf("[139Share] failed to parse extInfo.duration %q for %s",
+			resp.Data.ContentInfo.ExtInfo.Duration, coID)
+	}
+	// 所有返回路径统一带 X-Video-Duration，供 /api/fs/get 透传到 header。
+	makeLink := func(u string) *model.Link {
+		link := &model.Link{URL: u}
+		if dur > 0 {
+			link.Header = http.Header{}
+			link.Header.Set("X-Video-Duration", strconv.FormatFloat(dur, 'f', -1, 64))
+		}
+		return link
+	}
+
 	res := resp.Data.ContentInfo
 	if linkType == "video_preview" || linkType == "preview" || linkType == "thumb" {
 		if res.PresentURL == "" {
 			return nil, fmt.Errorf("failed to get preview link")
 		}
-		return &model.Link{URL: res.PresentURL}, nil
+		return makeLink(res.PresentURL), nil
 	}
 
 	if d.getAccount() == "" {
 		if res.PresentURL != "" {
-			return &model.Link{URL: res.PresentURL}, nil
+			return makeLink(res.PresentURL), nil
 		}
 		return nil, fmt.Errorf("139 share download requires account authentication")
 	}
@@ -811,13 +847,13 @@ func (d *Yun139) shareGetLinkWithRef(ref shareRef, coID string, linkType string)
 		return nil, err
 	}
 	if downloadResp.Data.ExtInfo.CDNDownloadURL != "" {
-		return &model.Link{URL: downloadResp.Data.ExtInfo.CDNDownloadURL}, nil
+		return makeLink(downloadResp.Data.ExtInfo.CDNDownloadURL), nil
 	}
 	if downloadResp.Data.RedrURL != "" {
-		return &model.Link{URL: downloadResp.Data.RedrURL}, nil
+		return makeLink(downloadResp.Data.RedrURL), nil
 	}
 	if downloadResp.Data.DownloadURL != "" {
-		return &model.Link{URL: downloadResp.Data.DownloadURL}, nil
+		return makeLink(downloadResp.Data.DownloadURL), nil
 	}
 
 	log.Debugf("[139Share] content info without embedded download url: %s", string(body))
