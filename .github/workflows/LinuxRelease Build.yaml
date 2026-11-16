@@ -40,30 +40,44 @@ jobs:
         with:
           go-version: "1.23.x"
 
+      # 如果你不需要测试可以删掉这一步，或者保留用来确保代码没问题
       - name: Go test
         run: go test ./internal/db/... ./internal/transcode/... ./internal/media/...
 
+      # 构建前端，如果这一步报错请告诉我
       - name: Setup web
         run: bash build.sh dev web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
-      - name: Build Linux static binary
-        uses: OpenListTeam/cgo-actions@v1.3.0
-        with:
-          targets: linux-musl-amd64
-          flags: '-ldflags=-s -w'
-          static-link-for-musl: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          out-dir: build
-          x-flags: |
-            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          output: openlist-${{ inputs.tag }}-linux-amd64
+      # 核心修改：直接使用原生的 go build 编译静态二进制文件
+      - name: Build Linux static binary (Native Go)
+        run: |
+          mkdir -p build
+          # 强制关闭 CGO，编译出全静态 Linux 二进制
+          export CGO_ENABLED=0
+          export GOOS=linux
+          export GOARCH=amd64
+          
+          # 注入版本信息和编译时间
+          TAG="${{ inputs.tag }}"
+          BUILT_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          
+          LDFLAGS="-s -w"
+          LDFLAGS="$LDFLAGS -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT'"
+          LDFLAGS="$LDFLAGS -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>'"
+          LDFLAGS="$LDFLAGS -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT'"
+          LDFLAGS="$LDFLAGS -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$TAG'"
+          LDFLAGS="$LDFLAGS -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'"
+          
+          echo "开始编译..."
+          # 编译主程序，输出到 build 目录
+          go build -trimpath -buildvcs=false -ldflags="$LDFLAGS" -o build/openlist-linux-amd64 .
+          
+          echo "编译完成，检查产物："
+          ls -lh build/
 
       - name: Package with tar.gz
         run: |
@@ -71,17 +85,15 @@ jobs:
           echo "=== 实际生成的构建产物 ==="
           ls -lh
           
-          # 自动查找 openlist 开头的可执行文件（排除已生成的压缩包）
+          # 自动查找 openlist 开头的可执行文件
           BIN_FILE=$(find . -maxdepth 1 -type f -name "openlist*" ! -name "*.tar.gz" | head -n 1)
           
           if [ -z "$BIN_FILE" ]; then
-            echo "::error::未在 build 目录中找到构建产物！请检查上面的构建日志。"
+            echo "::error::未在 build 目录中找到构建产物！请检查上面的编译日志。"
             exit 1
           fi
           
           echo "找到构建产物: $BIN_FILE"
-          
-          # 提取文件名（不含路径）进行打包
           BASENAME=$(basename "$BIN_FILE")
           tar -czf "openlist-${{ inputs.tag }}-linux-amd64.tar.gz" "$BASENAME"
           
