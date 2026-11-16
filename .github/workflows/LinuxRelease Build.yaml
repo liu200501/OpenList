@@ -68,8 +68,25 @@ jobs:
       - name: Package with tar.gz
         run: |
           cd build
-          tar -czf openlist-${{ inputs.tag }}-linux-amd64.tar.gz openlist-${{ inputs.tag }}-linux-amd64
+          echo "=== 实际生成的构建产物 ==="
           ls -lh
+          
+          # 自动查找 openlist 开头的可执行文件（排除已生成的压缩包）
+          BIN_FILE=$(find . -maxdepth 1 -type f -name "openlist*" ! -name "*.tar.gz" | head -n 1)
+          
+          if [ -z "$BIN_FILE" ]; then
+            echo "::error::未在 build 目录中找到构建产物！请检查上面的构建日志。"
+            exit 1
+          fi
+          
+          echo "找到构建产物: $BIN_FILE"
+          
+          # 提取文件名（不含路径）进行打包
+          BASENAME=$(basename "$BIN_FILE")
+          tar -czf "openlist-${{ inputs.tag }}-linux-amd64.tar.gz" "$BASENAME"
+          
+          echo "=== 打包完成 ==="
+          ls -lh *.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
