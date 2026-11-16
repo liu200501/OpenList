@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -16,6 +17,12 @@ import (
 
 // encryption and decryption command format for Crypt driver
 
+// failedFile records one file that could not be encrypted/decrypted.
+type failedFile struct {
+	src string
+	err error
+}
+
 type options struct {
 	op  string //decrypt or encrypt
 	src string //source dir or file
@@ -27,6 +34,10 @@ type options struct {
 	dirnameEncryption  string
 	filenameEncode     string
 	suffix             string
+
+	// failedFiles collects per-file failures so one unreadable file does not
+	// abort the whole run; the summary is printed after the walk finishes.
+	failedFiles []failedFile
 }
 
 var opt options
@@ -39,6 +50,7 @@ var CryptCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		opt.validate()
 		opt.cryptFileDir()
+		opt.reportFailed()
 
 	},
 }
@@ -123,7 +135,9 @@ func (o *options) cryptFileDir() {
 		if dst == "" {
 			dst = filepath.Dir(src)
 		}
-		o.cryptFile(cipher, src, dst)
+		if err := o.cryptFile(cipher, src, dst); err != nil {
+			o.failedFiles = append(o.failedFiles, failedFile{src: src, err: err})
+		}
 		return
 	}
 
@@ -135,12 +149,17 @@ func (o *options) cryptFileDir() {
 	log.Infof("dst : %v", dst)
 
 	dirnameMap := make(map[string]string)
-	pathSeparator := string(os.PathSeparator)
+	// 注意：原代码用 filepath.Walk 得到的 p 去 strings.ReplaceAll 绝对路径 src，
+	// 再按 os.PathSeparator 切分；这部分逻辑原样保留，只把变量名改准确。
+	sep := string(os.PathSeparator)
 
 	filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
-			log.Errorf("get file %v info failed, err:%v", p, err)
-			return err
+			// 目录本身读不到（权限/IO 错误）：Walk 无法继续下探，记录后
+			// 仍返回 nil，让兄弟目录继续处理，而不是中断整个目录树。
+			o.failedFiles = append(o.failedFiles, failedFile{src: p, err: err})
+			log.Errorf("get file %v info failed, skip, err:%v", p, err)
+			return nil
 		}
 		if p == src {
 			return nil
@@ -151,7 +170,10 @@ func (o *options) cryptFileDir() {
 		rp := strings.ReplaceAll(p, src, "")
 		log.Infof("relative path %v", rp)
 
-		rpds := strings.Split(rp, pathSeparator)
+		rpds := strings.Split(rp, sep)
+
+		// dirNameFailed 在目录名解密失败时置位：本目录无法映射到输出路径。
+		dirNameFailed := false
 
 		if info.IsDir() {
 			// absolute dst dir for current path
@@ -168,7 +190,7 @@ func (o *options) cryptFileDir() {
 							dirnameMap[oname] = rpds[i]
 						}
 					}
-					dd = path.Join(dst, strings.Join(rpds, pathSeparator))
+					dd = path.Join(dst, strings.Join(rpds, sep))
 				} else {
 					for i := range rpds {
 						oname := rpds[i]
@@ -177,20 +199,32 @@ func (o *options) cryptFileDir() {
 						} else {
 							dnn, err := cipher.DecryptDirName(rpds[i])
 							if err != nil {
-								log.Fatalf("decrypt dir name %v failed,err:%v", rpds[i], err)
+								o.failedFiles = append(o.failedFiles, failedFile{
+									src: p,
+									err: fmt.Errorf("decrypt dir name %q (segment %q): %w", p, rpds[i], err),
+								})
+								log.Errorf("decrypt dir name %v failed, skip dir %v, err:%v", rpds[i], p, err)
+								// 这个 continue 只跳到 rpds 的下一个路径段，
+								// 真正「跳过本目录」由下面的 dirNameFailed 完成。
+								dirNameFailed = true
+								continue
 							}
 							rpds[i] = dnn
 							dirnameMap[oname] = dnn
 						}
 
 					}
-					dd = path.Join(dst, strings.Join(rpds, pathSeparator))
+					dd = path.Join(dst, strings.Join(rpds, sep))
 				}
 
 			} else {
 				dd = path.Join(dst, rp)
 			}
 
+			if dirNameFailed {
+				log.Warnf("dir name decrypt failed, skip creating output dir for %v", p)
+				return nil
+			}
 			log.Infof("create output dir %v", dd)
 			checkCreateDir(dd)
 			return nil
@@ -208,26 +242,39 @@ func (o *options) cryptFileDir() {
 			}
 
 		} else {
-			fdd = path.Join(fdd, strings.Join(rpds[:len(rpds)-1], pathSeparator))
+			fdd = path.Join(fdd, strings.Join(rpds[:len(rpds)-1], sep))
 		}
 
 		log.Infof("file output dir %v", fdd)
-		o.cryptFile(cipher, p, fdd)
+		if err := o.cryptFile(cipher, p, fdd); err != nil {
+			o.failedFiles = append(o.failedFiles, failedFile{src: p, err: err})
+			log.Errorf("crypt file %v failed, skip, err:%v", p, err)
+			return nil // 单文件失败只跳过当前文件，继续遍历
+		}
 		return nil
 	})
 
 }
 
-func (o *options) cryptFile(cipher *rcCrypt.Cipher, src string, dst string) {
+// reportFailed 打印单文件失败汇总；退出码保持 0（调用方按需改）。
+func (o *options) reportFailed() {
+	if len(o.failedFiles) == 0 {
+		return
+	}
+	log.Warnf("%d file(s) failed and were skipped:", len(o.failedFiles))
+	for i, f := range o.failedFiles {
+		log.Warnf("  [%d] %v: %v", i+1, f.src, f.err)
+	}
+}
+
+func (o *options) cryptFile(cipher *rcCrypt.Cipher, src string, dst string) error {
 	fileInfo, err := os.Stat(src)
 	if err != nil {
-		log.Fatalf("get file %v  info failed,err:%v", src, err)
-
+		return fmt.Errorf("get file %v info failed: %w", src, err)
 	}
 	fd, err := os.OpenFile(src, os.O_RDWR, 0666)
 	if err != nil {
-		log.Fatalf("open file %v failed,err:%v", src, err)
-
+		return fmt.Errorf("open file %v failed: %w", src, err)
 	}
 	defer fd.Close()
 
@@ -243,8 +290,7 @@ func (o *options) cryptFile(cipher *rcCrypt.Cipher, src string, dst string) {
 		}
 		cryptSrcReader, err = cipher.EncryptData(fd)
 		if err != nil {
-			log.Fatalf("encrypt file %v failed,err:%v", src, err)
-
+			return fmt.Errorf("encrypt file %v failed: %w", src, err)
 		}
 		outFile = path.Join(dst, filename)
 	} else {
@@ -252,7 +298,7 @@ func (o *options) cryptFile(cipher *rcCrypt.Cipher, src string, dst string) {
 		if o.filenameEncryption != "off" {
 			filename, err = cipher.DecryptFileName(filename)
 			if err != nil {
-				log.Fatalf("decrypt file name %v failed,err:%v", src, err)
+				return fmt.Errorf("decrypt file name %v failed: %w", src, err)
 			}
 			log.Infof("decrypt file name %v to %v, ", fileInfo.Name(), filename)
 		} else {
@@ -261,24 +307,28 @@ func (o *options) cryptFile(cipher *rcCrypt.Cipher, src string, dst string) {
 
 		cryptSrcReader, err = cipher.DecryptData(fd)
 		if err != nil {
-			log.Fatalf("decrypt file %v failed,err:%v", src, err)
-
+			return fmt.Errorf("decrypt file %v failed: %w", src, err)
 		}
 		outFile = path.Join(dst, filename)
 	}
 	//write new file
-	wr, err := os.OpenFile(outFile, os.O_CREATE|os.O_WRONLY, 0755)
+	// O_TRUNC：重跑时截断已存在的产物，避免上次较长的输出在末尾留下残字节。
+	wr, err := os.OpenFile(outFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		log.Fatalf("create file %v failed,err:%v", outFile, err)
-
+		return fmt.Errorf("create file %v failed: %w", outFile, err)
 	}
 	defer wr.Close()
 
-	_, err = io.Copy(wr, cryptSrcReader)
-	if err != nil {
-		log.Fatalf("write file %v failed,err:%v", outFile, err)
+	if _, err = io.Copy(wr, cryptSrcReader); err != nil {
+		// 读错误（含坏道/CRC）通常在这里暴露：io.Copy 已写出部分字节。
+		// 关闭并删除半成品，避免留下看似完整实则损坏的产物。
+		_ = wr.Close()
+		if rmErr := os.Remove(outFile); rmErr != nil {
+			log.Warnf("remove partial output %v failed,err:%v", outFile, rmErr)
+		}
+		return fmt.Errorf("write file %v failed: %w", outFile, err)
 	}
-
+	return nil
 }
 
 // check dir exist ,if not ,create
