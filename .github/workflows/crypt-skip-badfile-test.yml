@@ -95,6 +95,17 @@ jobs:
           if (-not (Test-Path openlist-crypt.exe)) { throw '构建产物不存在' }
           Write-Host ('binary size = {0:N0} bytes' -f (Get-Item openlist-crypt.exe).Length)
 
+      # 上传编译产物，便于在任意机器直接取用，不必在本地区分新旧版本。
+      # if: always() 让断言步骤失败时也能拿到 exe，方便离线复现同一个二进制。
+      - name: Upload openlist-crypt.exe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlist-crypt-windows
+          path: openlist-crypt.exe
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Run crypt with one locked file and assert
         shell: pwsh
         run: |
