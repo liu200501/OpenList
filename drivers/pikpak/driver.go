@@ -36,6 +36,11 @@ func (d *PikPak) GetAddition() driver.Additional {
 }
 
 func (d *PikPak) Init(ctx context.Context) (err error) {
+	// 代理配置可能在编辑存储后变化，清空专用客户端缓存以便重建
+	if d.Common != nil {
+		d.client = nil
+		d.apiProxyUsed = ""
+	}
 	if d.Common == nil {
 		d.Common = &Common{
 			client:       base.NewRestyClient(),

@@ -40,6 +40,10 @@ type Link struct {
 	utils.SyncClosers `json:"-"`
 	// 如果SyncClosers中的资源被关闭后Link将不可用，则此值应为 true
 	RequireReference bool `json:"-"`
+
+	// DownloadProxyURL 是本链接下载文件字节时使用的正向代理地址（进程内使用，
+	// 不序列化到 API 响应）。由 op.Link 根据存储的 download_proxy_url 注入。
+	DownloadProxyURL string `json:"-"`
 }
 
 // Clone transfers ownership of l without inheriting its cache expiration.
@@ -53,6 +57,7 @@ func (l *Link) Clone() *Link {
 		ContentLength:    l.ContentLength,
 		SyncClosers:      utils.NewSyncClosers(l),
 		RequireReference: l.RequireReference,
+		DownloadProxyURL: l.DownloadProxyURL,
 	}
 }
 

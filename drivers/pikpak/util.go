@@ -110,7 +110,11 @@ func (d *PikPak) login() error {
 	}
 
 	var e ErrResp
-	res, err := base.RestyClient.SetRetryCount(1).R().SetError(&e).SetBody(base.Json{
+	apiClient, err := d.restyClient()
+	if err != nil {
+		return err
+	}
+	res, err := apiClient.SetRetryCount(1).R().SetError(&e).SetBody(base.Json{
 		"captcha_token": d.GetCaptchaToken(),
 		"client_id":     d.ClientID,
 		"client_secret": d.ClientSecret,
@@ -138,7 +142,11 @@ func (d *PikPak) login() error {
 func (d *PikPak) refreshToken(refreshToken string) error {
 	url := "https://user.mypikpak.net/v1/auth/token"
 	var e ErrResp
-	res, err := base.RestyClient.SetRetryCount(1).R().SetError(&e).
+	apiClient, err := d.restyClient()
+	if err != nil {
+		return err
+	}
+	res, err := apiClient.SetRetryCount(1).R().SetError(&e).
 		SetHeader("user-agent", "").SetBody(base.Json{
 		"client_id":     d.ClientID,
 		"client_secret": d.ClientSecret,
@@ -179,8 +187,38 @@ func (d *PikPak) refreshToken(refreshToken string) error {
 	return nil
 }
 
+// restyClient 返回 PikPak API 使用的 http 客户端。
+// 配置了 api_proxy 时使用专用代理客户端；否则回退全局 client，
+// 以兼容全局代理设置与依赖替换 base.RestyClient 的测试。
+func (d *PikPak) restyClient() (*resty.Client, error) {
+	if d.Common == nil {
+		return base.RestyClient, nil
+	}
+	proxy := strings.TrimSpace(d.APIProxy)
+	if proxy == "" {
+		return base.RestyClient, nil
+	}
+	if d.client != nil && d.apiProxyUsed == proxy {
+		return d.client, nil
+	}
+	client, err := base.NewRestyClientWithProxy(proxy)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return base.RestyClient, nil
+	}
+	d.client = client
+	d.apiProxyUsed = proxy
+	return client, nil
+}
+
 func (d *PikPak) request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
-	req := base.RestyClient.R()
+	client, err := d.restyClient()
+	if err != nil {
+		return nil, err
+	}
+	req := client.R()
 	req.SetHeaders(map[string]string{
 		//"Authorization":   "Bearer " + d.AccessToken,
 		"User-Agent":      d.GetUserAgent(),
@@ -266,6 +304,7 @@ func GetAction(method string, url string) string {
 
 type Common struct {
 	client       *resty.Client
+	apiProxyUsed string
 	CaptchaToken string
 	UserID       string
 	// 必要值,签名相关

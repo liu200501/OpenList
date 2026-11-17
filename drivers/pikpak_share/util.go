@@ -77,8 +77,37 @@ const (
 	PCSdkVersion         = "8.0.3"
 )
 
+// restyClient 返回 PikPakShare API 使用的 http 客户端。
+// 配置了 api_proxy 时使用专用代理客户端，否则回退全局 client。
+func (d *PikPakShare) restyClient() (*resty.Client, error) {
+	if d.Common == nil {
+		return base.RestyClient, nil
+	}
+	proxy := strings.TrimSpace(d.APIProxy)
+	if proxy == "" {
+		return base.RestyClient, nil
+	}
+	if d.client != nil && d.apiProxyUsed == proxy {
+		return d.client, nil
+	}
+	client, err := base.NewRestyClientWithProxy(proxy)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return base.RestyClient, nil
+	}
+	d.client = client
+	d.apiProxyUsed = proxy
+	return client, nil
+}
+
 func (d *PikPakShare) request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
-	req := base.RestyClient.R()
+	client, err := d.restyClient()
+	if err != nil {
+		return nil, err
+	}
+	req := client.R()
 	req.SetHeaders(map[string]string{
 		"User-Agent":      d.GetUserAgent(),
 		"X-Client-ID":     d.GetClientID(),
@@ -178,6 +207,7 @@ func GetAction(method string, url string) string {
 
 type Common struct {
 	client       *resty.Client
+	apiProxyUsed string
 	CaptchaToken string
 	// 必要值,签名相关
 	ClientID      string

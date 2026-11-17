@@ -270,4 +270,5 @@ const (
 	SkipNoOverwriteKey
 	ThumbnailBaseURLKey
 	KeepStreamKey
+	DownloadProxyKey
 )

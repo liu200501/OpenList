@@ -15,6 +15,7 @@ type Addition struct {
 	DeviceID         string `json:"device_id"  required:"false" default:""`
 	DisableMediaLink bool   `json:"disable_media_link" default:"true"`
 	SkipVerification bool   `json:"skip_verification" default:"false" help:"ignore the human verification URL returned by the captcha API instead of failing; enabling this may trigger PikPak risk control"`
+	APIProxy         string `json:"api_proxy" default:"" help:"HTTP(S) proxy for PikPak API requests (list, login, link), e.g. http://127.0.0.1:10808. Leave empty to use default."`
 }
 
 var config = driver.Config{

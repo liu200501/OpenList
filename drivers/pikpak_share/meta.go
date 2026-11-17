@@ -12,6 +12,7 @@ type Addition struct {
 	Platform              string `json:"platform" default:"web" required:"true" type:"select" options:"android,web,pc"`
 	DeviceID              string `json:"device_id"  required:"false" default:""`
 	UseTransCodingAddress bool   `json:"use_transcoding_address" required:"true" default:"false"`
+	APIProxy              string `json:"api_proxy" default:"" help:"HTTP(S) proxy for PikPak API requests (list, link), e.g. http://127.0.0.1:10808. Leave empty to use default."`
 }
 
 var config = driver.Config{

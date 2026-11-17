@@ -140,6 +140,11 @@ func getMainItems(config driver.Config) []driver.Item {
 		Type: conf.TypeText,
 	})
 	items = append(items, driver.Item{
+		Name: "download_proxy_url",
+		Type: conf.TypeText,
+		Help: "Per-storage forward HTTP(S) proxy for downloading file bytes, e.g. http://127.0.0.1:10808. When set, downloads of this storage go through the proxy and server-side proxy mode is enforced.",
+	})
+	items = append(items, driver.Item{
 		Name:    "disable_proxy_sign",
 		Type:    conf.TypeBool,
 		Default: "false",

@@ -107,6 +107,11 @@ func ShouldProxy(storage driver.Driver, filename string) bool {
 	if storage.Config().MustProxy() || storage.GetStorage().WebProxy {
 		return true
 	}
+	// 配置了存储级下载代理时必须走服务端代理：302 直链是浏览器自己下载，
+	// 服务端无法为其套用代理。
+	if storage.GetStorage().DownloadProxyURL != "" {
+		return true
+	}
 	if utils.SliceContains(conf.SlicesMap[conf.ProxyTypes], utils.Ext(filename)) {
 		return true
 	}

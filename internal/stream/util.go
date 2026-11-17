@@ -26,6 +26,14 @@ func (f RangeReaderFunc) RangeRead(ctx context.Context, httpRange http_range.Ran
 	return f(ctx, httpRange)
 }
 
+// withDownloadProxy 把 Link 上的存储级下载代理注入 context。
+func withDownloadProxy(ctx context.Context, link *model.Link) context.Context {
+	if link.DownloadProxyURL != "" {
+		return context.WithValue(ctx, conf.DownloadProxyKey, link.DownloadProxyURL)
+	}
+	return ctx
+}
+
 func GetRangeReaderFromLink(size int64, link *model.Link) (model.RangeReaderIF, error) {
 	if link.RangeReader != nil {
 		if link.Concurrency < 1 && link.PartSize < 1 {
@@ -70,6 +78,7 @@ func GetRangeReaderFromLink(size int64, link *model.Link) (model.RangeReaderIF, 
 			}
 		})
 		rangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+			ctx = withDownloadProxy(ctx, link)
 			requestHeader, _ := ctx.Value(conf.RequestHeaderKey).(http.Header)
 			header := net.ProcessHeader(requestHeader, link.Header)
 			return down.Download(ctx, &net.HttpRequestParams{
@@ -83,6 +92,7 @@ func GetRangeReaderFromLink(size int64, link *model.Link) (model.RangeReaderIF, 
 	}
 
 	rangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+		ctx = withDownloadProxy(ctx, link)
 		if httpRange.Length < 0 || httpRange.Start+httpRange.Length > size {
 			httpRange.Length = size - httpRange.Start
 		}

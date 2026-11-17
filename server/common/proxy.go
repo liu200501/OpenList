@@ -18,6 +18,12 @@ import (
 )
 
 func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.Obj) error {
+	// 将存储级下载代理注入请求 context，透明代理与 RangeReader/并发分片路径
+	// 都会经由 net.HttpClientForContext 读取它。
+	if link.DownloadProxyURL != "" {
+		r = r.WithContext(context.WithValue(r.Context(), conf.DownloadProxyKey, link.DownloadProxyURL))
+	}
+
 	// if link.MFile != nil {
 	// 	attachHeader(w, file, link)
 	// 	http.ServeContent(w, r, file.GetName(), file.ModTime(), link.MFile)
@@ -106,8 +112,9 @@ func ProxyRange(ctx context.Context, link *model.Link, size int64) *model.Link {
 		rrf, err := stream.GetRangeReaderFromLink(size, link)
 		if err == nil {
 			return &model.Link{
-				RangeReader:   rrf,
-				ContentLength: size,
+				RangeReader:      rrf,
+				ContentLength:    size,
+				DownloadProxyURL: link.DownloadProxyURL,
 			}
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	gonet "net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -295,7 +296,7 @@ func RequestHttp(ctx context.Context, httpMethod string, headerOverride http.Hea
 		return nil, err
 	}
 	req.Header = headerOverride
-	res, err := HttpClient().Do(req)
+	res, err := HttpClientForContext(ctx).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +342,52 @@ func HttpClient() *http.Client {
 		}
 	})
 	return httpClient
+}
+
+// proxyClients 缓存按代理地址创建的 http.Client，避免每个请求重建 Transport。
+var (
+	proxyClientsMu sync.Mutex
+	proxyClients   = make(map[string]*http.Client)
+)
+
+// HttpClientForContext 根据 context 中的 DownloadProxyKey 返回专用代理客户端。
+// 没有配置代理时回退到全局 HttpClient。所有客户端均套用 safeTransport 以保持 SSRF 防护。
+func HttpClientForContext(ctx context.Context) *http.Client {
+	proxyRaw, _ := ctx.Value(conf.DownloadProxyKey).(string)
+	if strings.TrimSpace(proxyRaw) == "" {
+		return HttpClient()
+	}
+	proxyURL, err := url.Parse(proxyRaw)
+	if err != nil || proxyURL.Host == "" {
+		log.Warnf("invalid download proxy %q, fallback to default client", proxyRaw)
+		return HttpClient()
+	}
+	proxyClientsMu.Lock()
+	defer proxyClientsMu.Unlock()
+	if c, ok := proxyClients[proxyRaw]; ok {
+		return c
+	}
+	insecureSkipVerify := false
+	if conf.Conf != nil {
+		insecureSkipVerify = conf.Conf.TlsInsecureSkipVerify
+	}
+	transport := &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify},
+	}
+	c := &http.Client{
+		Timeout:   time.Hour * 48,
+		Transport: &safeTransport{base: transport},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			req.Header.Del("Referer")
+			return nil
+		},
+	}
+	proxyClients[proxyRaw] = c
+	return c
 }
 
 func NewHttpClient() *http.Client {

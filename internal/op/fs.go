@@ -268,6 +268,10 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed get link")
 		}
+		// 注入存储级下载代理：在写入 link 缓存之前设置，保证缓存命中也带代理配置。
+		if p := storage.GetStorage().DownloadProxyURL; p != "" {
+			link.DownloadProxyURL = p
+		}
 		ol, err := admitLink(link, file)
 		if err != nil {
 			return nil, err
