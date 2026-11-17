@@ -1147,6 +1147,17 @@ func (d *Yun139) getGroupCloudHost() string {
 	return d.GroupCloudHost
 }
 
+// uploadRequestTimeout 是单个上传分片 HTTP 请求的硬超时。
+// base.HttpClient 的全局 Timeout 是 48h，在 Azure 等 IP 段被云盘边缘节点
+// 静默丢包时会无限期挂起，因此上传请求必须自带短超时。
+const uploadRequestTimeout = 5 * time.Minute
+
+// withUploadRequestTimeout 为一次上传请求派生带硬超时的 context。
+// 若父 ctx 本身已更早取消/超时，同样生效。
+func withUploadRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, uploadRequestTimeout)
+}
+
 func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, uploadPartInfos []PersonalPartInfo, ss streamPkg.StreamSectionReader, p *driver.Progress, onPartDone func(partNumber int64)) error {
 	sort.Slice(uploadPartInfos, func(i, j int) bool {
 		return uploadPartInfos[i].PartNumber < uploadPartInfos[j].PartNumber
@@ -1169,11 +1180,13 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 		partDoneStart := p.Done
 		err := retry.Do(
 			func() error {
+				partCtx, cancelPart := withUploadRequestTimeout(ctx)
+				defer cancelPart()
 				p.Done = partDoneStart
 				if _, seekErr := rd.Seek(0, io.SeekStart); seekErr != nil {
 					return seekErr
 				}
-				req, reqErr := http.NewRequestWithContext(ctx, http.MethodPut, uploadPartInfo.UploadUrl, io.TeeReader(rd, p))
+				req, reqErr := http.NewRequestWithContext(partCtx, http.MethodPut, uploadPartInfo.UploadUrl, io.TeeReader(rd, p))
 				if reqErr != nil {
 					return reqErr
 				}
@@ -1185,6 +1198,9 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 
 				res, doErr := base.HttpClient.Do(req)
 				if doErr != nil {
+					if partCtx.Err() == context.DeadlineExceeded {
+						return fmt.Errorf("139: upload part %d timed out after %s: %w", uploadPartInfo.PartNumber, uploadRequestTimeout, doErr)
+					}
 					return doErr
 				}
 				defer res.Body.Close()

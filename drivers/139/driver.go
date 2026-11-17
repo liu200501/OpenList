@@ -1112,10 +1112,12 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 
 			err = retry.Do(
 				func() error {
+					partCtx, cancelPart := withUploadRequestTimeout(ctx)
+					defer cancelPart()
 					if _, err := rd.Seek(0, io.SeekStart); err != nil {
 						return err
 					}
-					req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, resp.Data.UploadResult.RedirectionURL,
+					req, reqErr := http.NewRequestWithContext(partCtx, http.MethodPost, resp.Data.UploadResult.RedirectionURL,
 						io.TeeReader(rd, p))
 					if reqErr != nil {
 						return reqErr
@@ -1129,6 +1131,9 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 
 					res, doErr := base.HttpClient.Do(req)
 					if doErr != nil {
+						if partCtx.Err() == context.DeadlineExceeded {
+							return fmt.Errorf("139: upload part (offset %d) timed out after %s: %w", start, uploadRequestTimeout, doErr)
+						}
 						return doErr
 					}
 					defer res.Body.Close()
