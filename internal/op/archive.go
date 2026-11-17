@@ -474,24 +474,30 @@ func (s *streamWithParent) Close() error {
 	return err
 }
 
+// InternalExtract 提供压缩包内单个文件的读取（/ae 预览链路）。
+// 直接从压缩包解压非常昂贵（尤其 crypt + 云端盘），因此这里改为：
+// 先把成员完整解压并缓存到临时文件，后续请求直接打开缓存文件，
+// 并用 singleflight 合并并发请求。缓存逻辑见 extract_cache.go。
 func InternalExtract(ctx context.Context, storage driver.Driver, path string, args model.ArchiveInnerArgs) (io.ReadCloser, int64, error) {
-	_, t, ss, err := GetArchiveToolAndStream(ctx, storage, path, args.LinkArgs)
+	key := extractFileKey(storage, path, args)
+	ce, err := getCachedExtract(ctx, key, storage, path, args)
 	if err != nil {
 		return nil, 0, err
 	}
-	rc, size, err := t.Extract(ss, args)
+	rc, size, err := openCachedExtract(&extractedFile{path: ce.path, size: ce.size})
 	if err != nil {
-		var e error
-		for _, s := range ss {
-			e = stderrors.Join(e, s.Close())
+		// 缓存文件被外部删掉时失效重建，避免持续报错。
+		extractFileDelete(key)
+		ce, err = getCachedExtract(ctx, key, storage, path, args)
+		if err != nil {
+			return nil, 0, err
 		}
-		if e != nil {
-			log.Errorf("failed to close file streamer, %v", e)
-			err = stderrors.Join(err, e)
+		rc, size, err = openCachedExtract(&extractedFile{path: ce.path, size: ce.size})
+		if err != nil {
+			return nil, 0, err
 		}
-		return nil, 0, err
 	}
-	return &streamWithParent{rc: rc, parents: ss}, size, nil
+	return rc, size, nil
 }
 
 func ArchiveDecompress(ctx context.Context, storage driver.Driver, srcPath, dstDirPath string, args model.ArchiveDecompressArgs, lazyCache ...bool) error {

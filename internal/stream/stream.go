@@ -499,7 +499,7 @@ func NewReadAtSeeker(ss *SeekableStream, offset int64, forceRange ...bool) (mode
 		if offset < 0 || offset > ss.GetSize() {
 			return nil, errors.New("offset out of range")
 		}
-		reader, err := r.getReaderAtOffset(offset)
+		reader, err := r.getReaderAtOffset(offset, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -522,7 +522,9 @@ func NewMultiReaderAt(ss []*SeekableStream) (readerutil.SizeReaderAt, error) {
 	return readerutil.NewMultiReaderAt(readers...), nil
 }
 
-func (r *RangeReadReadAtSeeker) getReaderAtOffset(off int64) (io.Reader, error) {
+// getReaderAtOffset 返回一个从 off 开始的 reader。minLen 是调用方至少需要读到的
+// 字节数（ReadAt 里的 len(p)），用于保证一次 Range 请求足以满足 ReadFull。
+func (r *RangeReadReadAtSeeker) getReaderAtOffset(off int64, minLen int64) (io.Reader, error) {
 	if rr, cur, ok := r.readers.takeBest(off); ok {
 		if cur == off {
 			return rr, nil
@@ -532,7 +534,22 @@ func (r *RangeReadReadAtSeeker) getReaderAtOffset(off int64) (io.Reader, error) 
 			return rr, nil
 		}
 	}
-	reader, err := r.ss.RangeRead(http_range.Range{Start: off, Length: -1})
+	// 只请求有界的长度，不要 Length=-1（读到文件尾）。
+	// 归档内随机读取（如 ZIP 中央目录 / 成员解压）会频繁跳读；若每次都读到
+	// EOF，在 crypt + 移动云盘链路上会反复拉取整个压缩包。钳制到 MaxBlockLimit
+	// 既能覆盖 takeBest 的 4MiB 复用窗口，又不会浪费带宽。
+	length := int64(conf.MaxBlockLimit)
+	if length <= 0 {
+		length = int64(utils.MB)
+	}
+	// 单次读取比上限还大时必须整体满足，否则 ReadFull 会得到错误的 EOF。
+	if minLen > length {
+		length = minLen
+	}
+	if remain := r.ss.GetSize() - off; remain < length {
+		length = remain
+	}
+	reader, err := r.ss.RangeRead(http_range.Range{Start: off, Length: length})
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +564,7 @@ func (r *RangeReadReadAtSeeker) ReadAt(p []byte, off int64) (n int, err error) {
 		return r.headCache.head(p)
 	}
 	var rr io.Reader
-	rr, err = r.getReaderAtOffset(off)
+	rr, err = r.getReaderAtOffset(off, int64(len(p)))
 	if err != nil {
 		return 0, err
 	}

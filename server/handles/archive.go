@@ -1,9 +1,13 @@
 package handles
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	stdpath "path"
+	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/archive/tool"
@@ -376,9 +380,21 @@ func proxyInternalExtract(c *gin.Context, rc io.ReadCloser, size int64, fileName
 			log.Errorf("failed to close file streamer, %v", err)
 		}
 	}()
+	// 服务端已把解压结果缓存到临时文件（见 internal/op/extract_cache.go），
+	// 这里允许浏览器在同样时长内复用响应，避免切图时反复发起 /ae 请求。
+	// ETag 由稳定的归档身份（URL 路径 + inner/pass 参数）+ 大小生成，内容不变时可拿 304。
+	// 刻意不含 sign：签名带时间戳，会让 ETag 每次都变，失去 304 的意义。
+	identity := c.Request.URL.Path + "|" + c.Query("inner") + "|" + c.Query("pass") + "|" + fileName
+	sum := sha256.Sum256([]byte(identity + "|" + strconv.FormatInt(size, 10)))
+	etag := "\"" + hex.EncodeToString(sum[:]) + "\""
 	headers := map[string]string{
 		"Referrer-Policy": "no-referrer",
-		"Cache-Control":   "max-age=0, no-cache, no-store, must-revalidate",
+		"Cache-Control":   "public, max-age=600",
+		"ETag":            etag,
+	}
+	if c.Request.Header.Get("If-None-Match") == etag {
+		c.Status(http.StatusNotModified)
+		return
 	}
 	headers["Content-Disposition"] = utils.GenerateContentDisposition(fileName)
 	contentType := c.Request.Header.Get("Content-Type")

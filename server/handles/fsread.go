@@ -49,6 +49,10 @@ type ObjResp struct {
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
 	// ★ 视频时长（秒），非视频或未取到时为 0
 	Duration float64 `json:"duration,omitempty"`
+	// EncryptedName 是底层存储上的真实对象名（密文）。仅 Crypt 存储填充，
+	// 供前端「复制密文」按钮使用；非 Crypt 存储留空。只暴露 basename，
+	// 不下发完整密文路径以免泄露底层目录结构。
+	EncryptedName string `json:"encrypted_name,omitempty"`
 }
 
 type FsListResp struct {
@@ -121,7 +125,7 @@ func FsList(c *gin.Context, req *ListReq, user *model.User) {
 		}
 	}
 	common.SuccessResp(c, FsListResp{
-		Content:            toObjsResp(objs, reqPath, isEncrypt(meta, reqPath)),
+		Content:            toObjsResp(objs, reqPath, isEncrypt(meta, reqPath), provider == "Crypt"),
 		Total:              int64(total),
 		Readme:             getReadme(meta, reqPath),
 		Header:             getHeader(meta, reqPath),
@@ -282,11 +286,23 @@ func getObjDuration(obj model.Obj) float64 {
 	return 0
 }
 
-func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
+func toObjsResp(objs []model.Obj, parent string, encrypt bool, includeCipherName ...bool) []ObjResp {
+	withCipher := len(includeCipherName) > 0 && includeCipherName[0]
 	var resp []ObjResp
 	for _, obj := range objs {
 		thumb, _ := model.GetThumb(obj)
 		mountDetails, _ := model.GetStorageDetails(obj)
+		// Crypt 存储：底层对象的 Path 即为密文路径，取 basename 作为密文名。
+		// 使用可变参数保持既有调用点兼容（FsDirs 等未传时不会填充）。
+		var encryptedName string
+		if withCipher {
+			rawObj := model.UnwrapObjName(obj)
+			if !model.ObjHasMask(rawObj, model.Virtual) {
+				if rawPath := rawObj.GetPath(); rawPath != "" {
+					encryptedName = stdpath.Base(rawPath)
+				}
+			}
+		}
 		resp = append(resp, ObjResp{
 			Name:         obj.GetName(),
 			Size:         obj.GetSize(),
@@ -300,7 +316,8 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
 			// ★ 从 obj 上读时长（139 驱动已填充，未命中时为 0）
-			Duration: getObjDuration(obj),
+			Duration:      getObjDuration(obj),
+			EncryptedName: encryptedName,
 		})
 	}
 	return resp
@@ -375,7 +392,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 			common.ErrorResp(c, err, 500)
 			return
 		}
-		if storage.Config().MustProxy() || storage.GetStorage().WebProxy {
+		if storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().DownloadProxyURL != "" {
 			rawURL = common.GenerateDownProxyURL(storage.GetStorage(), reqPath)
 			if rawURL == "" {
 				query := ""
@@ -452,7 +469,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 		Readme:   getReadme(meta, reqPath),
 		Header:   respHeader,
 		Provider: provider,
-		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
+		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath), provider == "Crypt"),
 	})
 }
 
