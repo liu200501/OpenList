@@ -14,6 +14,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/search/meilisearch"
 	"github.com/OpenListTeam/OpenList/v4/internal/search/searcher"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/pkg/mq"
@@ -218,10 +219,11 @@ func Update(ctx context.Context, parent string, objs []model.Obj) {
 
 	// Use task queue for Meilisearch to avoid race conditions with async indexing
 	if msInstance, ok := instance.(interface {
-		EnqueueUpdate(parent string, objs []model.Obj)
+		EnqueueUpdate(parent string)
 	}); ok {
-		// Enqueue task for async processing (diff calculation happens at consumption time)
-		msInstance.EnqueueUpdate(parent, objs)
+		// Only the parent path is queued; the object list is re-read from the
+		// file system when the queue is consumed, so no stale snapshot is used.
+		msInstance.EnqueueUpdate(parent)
 		return
 	}
 
@@ -275,6 +277,25 @@ func Update(ctx context.Context, parent string, objs []model.Obj) {
 	}
 }
 
+// listCurrentObjects lists the live children of a mount path using an admin
+// context, matching the behaviour of BuildIndex. It is injected into the
+// Meilisearch task queue so updates are diffed against the current state
+// rather than the snapshot captured when the hook fired.
+func listCurrentObjects(ctx context.Context, parent string) ([]model.Obj, error) {
+	admin, err := op.GetAdmin()
+	if err != nil {
+		return nil, err
+	}
+	ctx = context.WithValue(ctx, conf.UserKey, admin)
+	return fs.List(ctx, parent, &fs.ListArgs{
+		NoLog:    true,
+		SkipHook: true,
+	})
+}
+
 func init() {
+	// Provide the Meilisearch task queue with a way to re-list directories at
+	// consumption time.
+	meilisearch.SetListObjectsFunc(listCurrentObjects)
 	op.RegisterObjsUpdateHook(Update)
 }

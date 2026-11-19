@@ -9,67 +9,89 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	mapset "github.com/deckarep/golang-set/v2"
 	log "github.com/sirupsen/logrus"
 )
 
-// QueuedTask represents a task in the queue
+// listObjectsFunc lists the current children of a parent path from the file
+// system. It is injected by the search package (which is allowed to import
+// internal/fs) so that this package does not have to import fs itself and
+// risk an import cycle: internal/fs -> internal/op -> ... -> internal/search.
+type listObjectsFunc func(ctx context.Context, parent string) ([]model.Obj, error)
+
+// QueuedTask represents a pending index update. Only the parent path is kept:
+// the object list is re-read from the file system when the task is consumed,
+// so a queued update can never act on a stale snapshot.
 type QueuedTask struct {
 	Parent    string
-	Objs      []model.Obj // current file system state
-	Depth     int         // path depth for sorting
-	EnqueueAt time.Time   // enqueue time
+	Depth     int       // path depth for sorting (shallow parents first)
+	EnqueueAt time.Time // enqueue time
 }
 
-// TaskQueueManager manages the task queue for async index operations
+// TaskQueueManager manages the task queue for async index operations.
 type TaskQueueManager struct {
 	queue        map[string]*QueuedTask // parent -> task
-	pendingTasks map[string][]int64     // parent -> all submitted taskUIDs
+	pendingTasks map[string][]int64     // parent -> submitted taskUIDs not yet known to be finished
 	mu           sync.RWMutex
 	ticker       *time.Ticker
+	stopOnce     sync.Once
 	stopCh       chan struct{}
 	m            *Meilisearch
-	consuming    atomic.Bool // flag to prevent concurrent consumption
+	consuming    atomic.Bool // prevents concurrent consumption
+	listObjects  listObjectsFunc
 }
 
-// NewTaskQueueManager creates a new task queue manager
-func NewTaskQueueManager(m *Meilisearch) *TaskQueueManager {
+// statusCheckTimeout bounds how long a single pending-task status read may
+// take, so a slow/unreachable Meilisearch server can never wedge the consumer.
+const (
+	consumeInterval    = 30 * time.Second
+	statusCheckTimeout = 10 * time.Second
+)
+
+// NewTaskQueueManager creates a new task queue manager.
+func NewTaskQueueManager(m *Meilisearch, listObjects listObjectsFunc) *TaskQueueManager {
 	return &TaskQueueManager{
 		queue:        make(map[string]*QueuedTask),
 		pendingTasks: make(map[string][]int64),
 		stopCh:       make(chan struct{}),
 		m:            m,
+		listObjects:  listObjects,
 	}
 }
 
-// calculateDepth calculates the depth of a path
-func calculateDepth(path string) int {
-	if path == "/" {
+// calculateDepth calculates the depth of a path.
+func calculateDepth(p string) int {
+	if p == "/" {
 		return 0
 	}
-	return strings.Count(strings.Trim(path, "/"), "/") + 1
+	return strings.Count(strings.Trim(p, "/"), "/") + 1
 }
 
-// Enqueue enqueues a task with current file system state
-func (tqm *TaskQueueManager) Enqueue(parent string, objs []model.Obj) {
+// Enqueue queues an update for a parent. Repeated updates for the same parent
+// are deduplicated; because only the path is stored, deduplication can never
+// discard a newer file-system snapshot.
+func (tqm *TaskQueueManager) Enqueue(parent string) {
 	tqm.mu.Lock()
 	defer tqm.mu.Unlock()
 
-	// deduplicate: overwrite existing task with the same parent
+	if _, exists := tqm.queue[parent]; exists {
+		return
+	}
 	tqm.queue[parent] = &QueuedTask{
 		Parent:    parent,
-		Objs:      objs,
 		Depth:     calculateDepth(parent),
 		EnqueueAt: time.Now(),
 	}
-	log.Debugf("enqueued update task for parent: %s, depth: %d, objs: %d", parent, calculateDepth(parent), len(objs))
+	log.Debugf("enqueued update task for parent: %s, depth: %d", parent, calculateDepth(parent))
 }
 
-// Start starts the task queue consumer
+// Start starts the task queue consumer.
 func (tqm *TaskQueueManager) Start() {
-	tqm.ticker = time.NewTicker(30 * time.Second)
+	tqm.ticker = time.NewTicker(consumeInterval)
 	go func() {
 		for {
 			select {
@@ -81,20 +103,21 @@ func (tqm *TaskQueueManager) Start() {
 			}
 		}
 	}()
-	log.Info("task queue manager started, will consume every 30 seconds")
+	log.Infof("task queue manager started, will consume every %s", consumeInterval)
 }
 
-// Stop stops the task queue consumer
+// Stop stops the task queue consumer. It is safe to call more than once.
 func (tqm *TaskQueueManager) Stop() {
-	if tqm.ticker != nil {
-		tqm.ticker.Stop()
-	}
-	close(tqm.stopCh)
+	tqm.stopOnce.Do(func() {
+		if tqm.ticker != nil {
+			tqm.ticker.Stop()
+		}
+		close(tqm.stopCh)
+	})
 }
 
-// consume processes all tasks in the queue
+// consume processes all tasks in the queue.
 func (tqm *TaskQueueManager) consume() {
-	// Prevent concurrent consumption
 	if !tqm.consuming.CompareAndSwap(false, true) {
 		log.Warn("previous consume still running, skip this round")
 		return
@@ -102,25 +125,20 @@ func (tqm *TaskQueueManager) consume() {
 	defer tqm.consuming.Store(false)
 
 	tqm.mu.Lock()
-
-	// extract all tasks
 	tasks := make([]*QueuedTask, 0, len(tqm.queue))
 	for _, task := range tqm.queue {
 		tasks = append(tasks, task)
 	}
-
-	// clear queue
+	// clear queue; skipped tasks are re-enqueued below
 	tqm.queue = make(map[string]*QueuedTask)
-
 	tqm.mu.Unlock()
 
 	if len(tasks) == 0 {
 		return
 	}
-
 	log.Infof("consuming task queue: %d tasks", len(tasks))
 
-	// sort tasks: shallow paths first, then by enqueue time
+	// Shallow parents first so a directory is indexed before its children.
 	sort.Slice(tasks, func(i, j int) bool {
 		if tasks[i].Depth != tasks[j].Depth {
 			return tasks[i].Depth < tasks[j].Depth
@@ -130,72 +148,93 @@ func (tqm *TaskQueueManager) consume() {
 
 	ctx := context.Background()
 
-	// execute tasks in order
 	for _, task := range tasks {
-		// Check if there are pending tasks for this parent
+		parent := task.Parent
+
+		// Wait for the parent's previous Meilisearch tasks to settle before
+		// diffing again, otherwise concurrent tasks race with each other.
 		tqm.mu.RLock()
-		pendingTaskUIDs, hasPending := tqm.pendingTasks[task.Parent]
+		prevUIDs := append([]int64(nil), tqm.pendingTasks[parent]...)
 		tqm.mu.RUnlock()
-
-		if hasPending && len(pendingTaskUIDs) > 0 {
-			// Check all pending task statuses
-			allCompleted := true
-			for _, taskUID := range pendingTaskUIDs {
-				taskStatus, err := tqm.m.getTaskStatus(ctx, taskUID)
+		if len(prevUIDs) > 0 {
+			stillRunning := false
+			for _, uid := range prevUIDs {
+				done, err := tqm.taskDone(ctx, uid)
 				if err != nil {
-					log.Errorf("failed to get task status for parent %s (taskUID: %d): %v", task.Parent, taskUID, err)
-					// If we can't get status, assume it's done and continue checking
-					continue
+					log.Warnf("failed to check task %d status for parent %s: %v", uid, parent, err)
+					// On error, be conservative and retry this parent next round
+					// instead of running a diff against a possibly stale index.
+					stillRunning = true
+					break
 				}
-
-				// Check if task is still running
-				if taskStatus == "enqueued" || taskStatus == "processing" {
-					log.Warnf("skipping task for parent %s: previous task %d still %s", task.Parent, taskUID, taskStatus)
-					allCompleted = false
-					break // No need to check remaining tasks
+				if !done {
+					stillRunning = true
+					break
 				}
 			}
-
-			if !allCompleted {
-				// Re-enqueue the task if not already in queue (avoid overwriting newer snapshots)
-				tqm.mu.Lock()
-				if _, exists := tqm.queue[task.Parent]; !exists {
-					tqm.queue[task.Parent] = task
-					log.Debugf("re-enqueued skipped task for parent %s due to pending tasks", task.Parent)
-				} else {
-					log.Debugf("skipped task for parent %s not re-enqueued (newer task already in queue)", task.Parent)
-				}
-				tqm.mu.Unlock()
-				continue // Skip this task, some previous tasks are still running
+			if stillRunning {
+				log.Debugf("parent %s has unfinished tasks, re-enqueueing for next round", parent)
+				tqm.reEnqueue(task)
+				continue
 			}
-
-			// All tasks are in terminal state, remove from pending
-			log.Debugf("all previous tasks for parent %s are completed, proceeding with new task", task.Parent)
 			tqm.mu.Lock()
-			delete(tqm.pendingTasks, task.Parent)
+			delete(tqm.pendingTasks, parent)
 			tqm.mu.Unlock()
 		}
 
-		// Execute the task
-		tqm.executeTask(ctx, task)
+		tqm.executeTask(ctx, parent)
 	}
-
-	log.Infof("task queue consumption completed")
 }
 
-// executeTask executes a single task
-func (tqm *TaskQueueManager) executeTask(ctx context.Context, task *QueuedTask) {
-	parent := task.Parent
-	currentObjs := task.Objs
+// taskDone reports whether the given task reached a terminal state. It uses a
+// non-blocking status read with a bounded context, so a slow/stuck task can
+// never wedge the consumer (WaitForTaskWithContext would block until terminal).
+func (tqm *TaskQueueManager) taskDone(ctx context.Context, taskUID int64) (bool, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, statusCheckTimeout)
+	defer cancel()
+	task, err := tqm.m.Client.GetTaskWithContext(waitCtx, taskUID)
+	if err != nil {
+		return false, err
+	}
+	// Only enqueued/processing are non-terminal. Everything else (succeeded,
+	// failed, canceled) is terminal. Comparing the underlying string keeps
+	// this robust against constant renames across meilisearch-go versions.
+	status := string(task.Status)
+	if status == "enqueued" || status == "processing" {
+		return false, nil
+	}
+	if status != "succeeded" {
+		log.Warnf("meilisearch task %d ended with status %s", taskUID, status)
+	}
+	return true, nil
+}
 
-	// Query index to get old state
+// reEnqueue puts a skipped task back without overwriting a newer entry.
+func (tqm *TaskQueueManager) reEnqueue(task *QueuedTask) {
+	tqm.mu.Lock()
+	defer tqm.mu.Unlock()
+	if _, exists := tqm.queue[task.Parent]; !exists {
+		tqm.queue[task.Parent] = task
+	}
+}
+
+// executeTask diffs the current index against the live file system and
+// applies the changes.
+func (tqm *TaskQueueManager) executeTask(ctx context.Context, parent string) {
+	// Re-list the parent at consumption time so we never work from a stale
+	// snapshot captured when the hook fired.
+	currentObjs, err := tqm.listObjects(ctx, parent)
+	if err != nil {
+		log.Errorf("failed to list current objects for parent %s: %v", parent, err)
+		return
+	}
+
 	nodes, err := tqm.m.Get(ctx, parent)
 	if err != nil {
 		log.Errorf("failed to get indexed nodes for parent %s: %v", parent, err)
 		return
 	}
 
-	// Calculate diff based on current index state
 	now := mapset.NewSet[string]()
 	for i := range currentObjs {
 		now.Add(currentObjs[i].GetName())
@@ -208,7 +247,8 @@ func (tqm *TaskQueueManager) executeTask(ctx context.Context, task *QueuedTask) 
 	toDelete := old.Difference(now)
 	toAdd := now.Difference(old)
 
-	// Collect paths to delete
+	// Collect paths to delete. HasStorage excludes mounted storages, which are
+	// not ordinary child objects and must not be removed from the index here.
 	var pathsToDelete []string
 	for i := range nodes {
 		if toDelete.Contains(nodes[i].Name) && !op.HasStorage(path.Join(parent, nodes[i].Name)) {
@@ -218,48 +258,123 @@ func (tqm *TaskQueueManager) executeTask(ctx context.Context, task *QueuedTask) 
 
 	var allTaskUIDs []int64
 
-	// Execute delete first
 	if len(pathsToDelete) > 0 {
 		log.Debugf("executing delete for parent %s: %d paths", parent, len(pathsToDelete))
-		taskUIDs, err := tqm.m.batchDeleteWithTaskUID(ctx, pathsToDelete)
+		uids, err := tqm.m.batchDeleteWithTaskUID(ctx, pathsToDelete)
 		if err != nil {
 			log.Errorf("failed to batch delete for parent %s: %v", parent, err)
-			// Continue to add even if delete fails
 		} else {
-			allTaskUIDs = append(allTaskUIDs, taskUIDs...)
+			allTaskUIDs = append(allTaskUIDs, uids...)
 		}
 	}
 
-	// Collect objects to add
+	// Collect the nodes to add. New directories are expanded recursively so
+	// their children become searchable without a manual full rebuild.
 	var nodesToAdd []model.SearchNode
 	for i := range currentObjs {
-		if toAdd.Contains(currentObjs[i].GetName()) {
-			log.Debugf("will add index: %s", path.Join(parent, currentObjs[i].GetName()))
+		obj := currentObjs[i]
+		if !toAdd.Contains(obj.GetName()) {
+			continue
+		}
+		nodePath := path.Join(parent, obj.GetName())
+		if obj.IsDir() {
+			uids := tqm.indexNewDirectory(ctx, nodePath)
+			allTaskUIDs = append(allTaskUIDs, uids...)
+		} else {
+			log.Debugf("will add index: %s", nodePath)
 			nodesToAdd = append(nodesToAdd, model.SearchNode{
 				Parent: parent,
-				Name:   currentObjs[i].GetName(),
-				IsDir:  currentObjs[i].IsDir(),
-				Size:   currentObjs[i].GetSize(),
+				Name:   obj.GetName(),
+				IsDir:  obj.IsDir(),
+				Size:   obj.GetSize(),
 			})
 		}
 	}
 
-	// Execute add
 	if len(nodesToAdd) > 0 {
 		log.Debugf("executing add for parent %s: %d nodes", parent, len(nodesToAdd))
-		taskUIDs, err := tqm.m.batchIndexWithTaskUID(ctx, nodesToAdd)
+		uids, err := tqm.m.batchIndexWithTaskUID(ctx, nodesToAdd)
 		if err != nil {
 			log.Errorf("failed to batch index for parent %s: %v", parent, err)
 		} else {
-			allTaskUIDs = append(allTaskUIDs, taskUIDs...)
+			allTaskUIDs = append(allTaskUIDs, uids...)
 		}
 	}
 
-	// Record all task UIDs for this parent
 	if len(allTaskUIDs) > 0 {
 		tqm.mu.Lock()
 		tqm.pendingTasks[parent] = allTaskUIDs
 		tqm.mu.Unlock()
 		log.Debugf("recorded %d taskUIDs for parent %s", len(allTaskUIDs), parent)
 	}
+}
+
+// indexNewDirectory recursively indexes a newly created directory and all of
+// its descendants (bounded by the configured max index depth).
+func (tqm *TaskQueueManager) indexNewDirectory(ctx context.Context, dir string) []int64 {
+	var uids []int64
+	depth := calculateDepth(dir)
+	limit := setting.GetInt(conf.MaxIndexDepth, 20)
+	if depth > limit {
+		limit = depth
+	}
+	err := tqm.walkNewDir(ctx, dir, limit-depth, func(nodes []model.SearchNode) {
+		if len(nodes) == 0 {
+			return
+		}
+		batchUIDs, err := tqm.m.batchIndexWithTaskUID(ctx, nodes)
+		if err != nil {
+			log.Errorf("failed to batch index directory %s: %v", dir, err)
+			return
+		}
+		uids = append(uids, batchUIDs...)
+	})
+	if err != nil {
+		log.Errorf("failed to walk new directory %s: %v", dir, err)
+	}
+	return uids
+}
+
+// walkNewDir walks dir up to depth levels below it and batches every visited
+// node (including the directory itself) into emit.
+func (tqm *TaskQueueManager) walkNewDir(ctx context.Context, dir string, depth int, emit func([]model.SearchNode)) error {
+	parent, name := path.Split(dir)
+	parent = strings.TrimSuffix(parent, "/")
+	if parent == "" {
+		parent = "/"
+	}
+	batch := []model.SearchNode{{Parent: parent, Name: name, IsDir: true, Size: 0}}
+
+	var recurse func(p string, d int) error
+	recurse = func(p string, d int) error {
+		if d <= 0 {
+			return nil
+		}
+		objs, err := tqm.listObjects(ctx, p)
+		if err != nil {
+			return err
+		}
+		for i := range objs {
+			obj := objs[i]
+			nodePath := path.Join(p, obj.GetName())
+			batch = append(batch, model.SearchNode{
+				Parent: p,
+				Name:   obj.GetName(),
+				IsDir:  obj.IsDir(),
+				Size:   obj.GetSize(),
+			})
+			if obj.IsDir() {
+				if err := recurse(nodePath, d-1); err != nil {
+					log.Warnf("failed to walk %s: %v", nodePath, err)
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := recurse(dir, depth); err != nil {
+		return err
+	}
+	emit(batch)
+	return nil
 }
