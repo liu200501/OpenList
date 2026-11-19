@@ -61,6 +61,14 @@ func UpdateIndex(c *gin.Context) {
 			log.Errorf("get index progress error: %+v", err)
 			progress = &model.IndexProgress{}
 		}
+		// 更新期间标记为未完成，避免增量更新误以为索引已就绪；
+		// 保留上次成功时间与错误信息，避免取消时丢失。
+		search.WriteProgress(&model.IndexProgress{
+			ObjCount:     progress.ObjCount,
+			IsDone:       false,
+			LastDoneTime: progress.LastDoneTime,
+			Error:        progress.Error,
+		})
 		for _, path := range req.Paths {
 			err = search.Del(ctx, path)
 			if err != nil {
@@ -72,11 +80,10 @@ func UpdateIndex(c *gin.Context) {
 			conf.SlicesMap[conf.IgnorePaths], req.MaxDepth, false)
 		if err != nil {
 			log.Errorf("update index error: %+v", err)
-			now := time.Now()
 			search.WriteProgress(&model.IndexProgress{
 				ObjCount:     progress.ObjCount,
-				IsDone:       true,
-				LastDoneTime: &now,
+				IsDone:       false,
+				LastDoneTime: progress.LastDoneTime,
 				Error:        err.Error(),
 			})
 			return
@@ -111,9 +118,10 @@ func ClearIndex(c *gin.Context) {
 		return
 	}
 	search.Clear(c)
+	// 清空后没有成功构建时间，不能标记为 done，否则增量更新会被错误放行。
 	search.WriteProgress(&model.IndexProgress{
 		ObjCount:     0,
-		IsDone:       true,
+		IsDone:       false,
 		LastDoneTime: nil,
 		Error:        "",
 	})

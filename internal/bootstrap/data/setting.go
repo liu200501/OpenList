@@ -204,6 +204,8 @@ func InitialSettings() []model.SettingItem {
 		{Key: conf.AutoUpdateIndex, Value: "false", Type: conf.TypeBool, Group: model.INDEX},
 		{Key: conf.IgnorePaths, Value: "", Type: conf.TypeText, Group: model.INDEX, Flag: model.PRIVATE, Help: `每行一条路径`},
 		{Key: conf.MaxIndexDepth, Value: "20", Type: conf.TypeNumber, Group: model.INDEX, Flag: model.PRIVATE, Help: `索引最大深度`},
+		{Key: conf.IndexWatchEnable, Value: "false", Type: conf.TypeBool, Group: model.INDEX, Help: `开启后按下面的规则主动监听驱动/目录变化并更新搜索索引（Local 用文件系统事件实时感知、139Yun/Crypt 定时轮询）`},
+		{Key: conf.IndexWatchRules, Value: "[]", Type: conf.TypeText, Group: model.INDEX, Help: `JSON 数组，每项: {"enabled":true,"driver":"139Yun","path":"/移动云盘/追剧","interval":600,"depth":2}。driver: 139Yun/Local/Crypt 或留空；path: 挂载虚拟路径；interval: 轮询秒数；depth: 递归深度(0只看当前目录)`},
 		{Key: conf.IndexProgress, Value: "{}", Type: conf.TypeText, Group: model.SINGLE, Flag: model.PRIVATE},
 
 		// SSO settings

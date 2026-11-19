@@ -46,6 +46,6 @@ jobs:
           packages=$(go list ./... | grep -v '/pkg/aria2/rpc$')
           go test $packages -count=1 -timeout 30m
 
-      - name: Race test (search packages)
+      - name: Race test (search & index watcher)
         shell: bash
-        run: go test -race ./internal/search/... -count=1 -timeout 15m
+        run: go test -race ./internal/search/... ./internal/indexwatch/... -count=1 -timeout 15m

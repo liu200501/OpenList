@@ -47,7 +47,15 @@ func Init(mode string) error {
 	return err
 }
 
+// Enabled 报告当前是否有可用的搜索索引实例。
+func Enabled() bool {
+	return instance != nil
+}
+
 func Search(ctx context.Context, req model.SearchReq) ([]model.SearchNode, int64, error) {
+	if instance == nil {
+		return nil, 0, fmt.Errorf("search index is not enabled")
+	}
 	return instance.Search(ctx, req)
 }
 

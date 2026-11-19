@@ -4,6 +4,7 @@ import (
 	"context"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,10 +114,18 @@ func BuildIndex(ctx context.Context, indexPaths, ignorePaths []string, maxDepth 
 						log.Infof("success build index, count: %d", objCount)
 					}
 					if count {
+						// 构建失败时不能标记为 done，否则增量更新会被误放行。
+						// 成功时才用本次完成时间，失败则沿用上一次成功时间。
+						var lastDone *time.Time
+						if eMsg == "" {
+							lastDone = &now
+						} else if p, pErr := Progress(); pErr == nil {
+							lastDone = p.LastDoneTime
+						}
 						WriteProgress(&model.IndexProgress{
 							ObjCount:     objCount,
-							IsDone:       true,
-							LastDoneTime: &now,
+							IsDone:       eMsg == "",
+							LastDoneTime: lastDone,
 							Error:        eMsg,
 						})
 					}
@@ -200,23 +209,52 @@ func Config(ctx context.Context) searcher.Config {
 	return instance.Config()
 }
 
+// isDisabledIndex 判断 parent 是否属于一个禁用了索引的存储。
+// 全量构建会跳过 DisableIndex 的存储（见 walkFn），增量更新也必须保持一致，
+// 否则这类存储在用户浏览目录时仍会被写进索引。
+func isDisabledIndex(parent string) bool {
+	storage, _, err := op.GetStorageAndActualPath(parent)
+	if err != nil {
+		return false
+	}
+	return storage.GetStorage().DisableIndex
+}
+
 func Update(ctx context.Context, parent string, objs []model.Obj) {
 	if instance == nil || !instance.Config().AutoUpdate || !setting.GetBool(conf.AutoUpdateIndex) || Running() {
 		return
 	}
-	if isIgnorePath(parent) {
+	if isIgnorePath(parent) || isDisabledIndex(parent) {
 		return
 	}
-	// only update when index have built
+	// only update when index have built, and the build actually succeeded
 	progress, err := Progress()
 	if err != nil {
 		log.Errorf("update search index error while get progress: %+v", err)
 		return
 	}
-	if !progress.IsDone {
+	if !progress.IsDone || progress.LastDoneTime == nil {
 		return
 	}
+	doUpdate(ctx, parent, objs)
+}
 
+// UpdateForced 供索引 watcher 使用：按路径强制维护索引，绕过全局
+// auto_update_index 开关与 index_progress 的完成状态判断。仍然尊重
+// ignore_paths 与存储的 DisableIndex，并要求当前 searcher 支持增量更新。
+// 全量构建期间本轮直接跳过（构建会重新遍历整棵树）。
+func UpdateForced(ctx context.Context, parent string, objs []model.Obj) {
+	if instance == nil || !instance.Config().AutoUpdate || Running() {
+		return
+	}
+	if isIgnorePath(parent) || isDisabledIndex(parent) {
+		return
+	}
+	doUpdate(ctx, parent, objs)
+}
+
+// doUpdate 执行真正的差异比对与索引写入。
+func doUpdate(ctx context.Context, parent string, objs []model.Obj) {
 	// Use task queue for Meilisearch to avoid race conditions with async indexing
 	if msInstance, ok := instance.(interface {
 		EnqueueUpdate(parent string)
@@ -235,19 +273,28 @@ func Update(ctx context.Context, parent string, objs []model.Obj) {
 		log.Errorf("update search index error while get nodes: %+v", err)
 		return
 	}
+	// 用「名字 + 目录标记 + 大小」做差异比对：同名文件被覆盖但大小变化时，
+	// 旧实现只按名字比对会漏更新，导致搜索结果一直是旧数据。
+	objKey := func(name string, isDir bool, size int64) string {
+		return name + "\x00" + strconv.FormatBool(isDir) + "\x00" + strconv.FormatInt(size, 10)
+	}
 	now := mapset.NewSet[string]()
 	for i := range objs {
-		now.Add(objs[i].GetName())
+		now.Add(objKey(objs[i].GetName(), objs[i].IsDir(), objs[i].GetSize()))
 	}
 	old := mapset.NewSet[string]()
 	for i := range nodes {
-		old.Add(nodes[i].Name)
+		old.Add(objKey(nodes[i].Name, nodes[i].IsDir, nodes[i].Size))
 	}
-	// delete data that no longer exists
+	// delete data that no longer exists or has changed
 	toDelete := old.Difference(now)
 	toAdd := now.Difference(old)
+	deleted := make(map[string]bool)
 	for i := range nodes {
-		if toDelete.Contains(nodes[i].Name) && !op.HasStorage(path.Join(parent, nodes[i].Name)) {
+		key := objKey(nodes[i].Name, nodes[i].IsDir, nodes[i].Size)
+		if toDelete.Contains(key) && !deleted[nodes[i].Name] &&
+			!op.HasStorage(path.Join(parent, nodes[i].Name)) {
+			deleted[nodes[i].Name] = true
 			log.Debugf("delete index: %s", path.Join(parent, nodes[i].Name))
 			err = instance.Del(ctx, path.Join(parent, nodes[i].Name))
 			if err != nil {
@@ -257,9 +304,12 @@ func Update(ctx context.Context, parent string, objs []model.Obj) {
 		}
 	}
 	// collect files and folders to add in batch
+	added := make(map[string]bool)
 	var toAddObjs []ObjWithParent
 	for i := range objs {
-		if toAdd.Contains(objs[i].GetName()) {
+		key := objKey(objs[i].GetName(), objs[i].IsDir(), objs[i].GetSize())
+		if toAdd.Contains(key) && !added[objs[i].GetName()] {
+			added[objs[i].GetName()] = true
 			log.Debugf("add index: %s", path.Join(parent, objs[i].GetName()))
 			toAddObjs = append(toAddObjs, ObjWithParent{
 				Parent: parent,
