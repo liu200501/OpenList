@@ -46,6 +46,9 @@ jobs:
           mkdir -p public/dist
           [ -f public/dist/index.html ] || printf '<!doctype html><title>CI placeholder</title>\n' > public/dist/index.html
 
+      - name: Tidy modules
+        run: go mod tidy
+
       - name: Build
         run: go build ./...
 
