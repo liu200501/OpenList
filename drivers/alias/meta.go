@@ -7,6 +7,7 @@ import (
 
 type Addition struct {
 	Paths                string `json:"paths" required:"true" type:"text"`
+	FineFavorites        string `json:"fine_favorites" type:"text" help:"二级收藏夹名称，每行一个；仅对挂载在 /收藏 的别名生效，保存后自动生成 /收藏/名称 子别名存储"`
 	ReadConflictPolicy   string `json:"read_conflict_policy" type:"select" options:"first,random,all" default:"first"`
 	WriteConflictPolicy  string `json:"write_conflict_policy" type:"select" options:"disabled,first,deterministic,deterministic_or_all,all,all_strict" default:"disabled" help:"How the driver handles identical backend paths when renaming, removing, or making directories."`
 	PutConflictPolicy    string `json:"put_conflict_policy" type:"select" options:"disabled,first,deterministic,deterministic_or_all,all,all_strict,random,quota,quota_strict" default:"disabled" help:"How the driver handles identical backend paths when uploading, copying, moving, or decompressing."`

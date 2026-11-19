@@ -105,6 +105,8 @@ func CreateStorage(c *gin.Context) {
 			"id": id,
 		}, true)
 	} else {
+		// 保存 /收藏 别名后，按配置框里的名字同步二级收藏夹子存储。
+		syncFineFavoriteStorages(c.Request.Context(), req)
 		common.SuccessResp(c, gin.H{
 			"id": id,
 		})
@@ -120,6 +122,8 @@ func UpdateStorage(c *gin.Context) {
 	if err := op.UpdateStorage(c.Request.Context(), req); err != nil {
 		common.ErrorResp(c, err, 500, true)
 	} else {
+		// 编辑 /收藏 别名时，按配置框里的名字同步二级收藏夹子存储。
+		syncFineFavoriteStorages(c.Request.Context(), req)
 		common.SuccessResp(c)
 	}
 }
@@ -131,9 +135,19 @@ func DeleteStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	// 删除 /收藏 别名时，一并清理它自动创建的二级收藏夹子存储。
+	// 必须在删除前读取挂载路径，删除后记录已不存在。
+	wasFavorite := false
+	if deleted, err := db.GetStorageById(uint(id)); err == nil &&
+		deleted.Driver == "Alias" && normalizeFineFavMount(deleted.MountPath) == fineFavFavoriteMount {
+		wasFavorite = true
+	}
 	if err := op.DeleteStorageById(c.Request.Context(), uint(id)); err != nil {
 		common.ErrorResp(c, err, 500, true)
 		return
+	}
+	if wasFavorite {
+		removeAllFineFavoriteStorages(c.Request.Context())
 	}
 	common.SuccessResp(c)
 }
