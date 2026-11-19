@@ -1,0 +1,51 @@
+name: All Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: all-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare embedded web assets
+        shell: bash
+        # public/dist is git-ignored; go:embed only needs a placeholder to compile.
+        run: |
+          mkdir -p public/dist
+          [ -f public/dist/index.html ] || printf '<!doctype html><title>CI placeholder</title>\n' > public/dist/index.html
+
+      - name: Build all packages
+        run: go build ./...
+
+      # pkg/aria2/rpc is excluded by the project's existing test workflow.
+      - name: Run all tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=$(go list ./... | grep -v '/pkg/aria2/rpc$')
+          go test $packages -count=1 -timeout 30m
+
+      - name: Race test (search packages)
+        shell: bash
+        run: go test -race ./internal/search/... -count=1 -timeout 15m

@@ -1,6 +1,7 @@
 package meilisearch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -93,7 +94,12 @@ func init() {
 		}
 
 		// Initialize and start task queue manager
-		m.taskQueue = NewTaskQueueManager(&m)
+		m.taskQueue = NewTaskQueueManager(&m, func(ctx context.Context, parent string) ([]model.Obj, error) {
+			if listObjects == nil {
+				return nil, errors.New("meilisearch: object lister is not configured")
+			}
+			return listObjects(ctx, parent)
+		})
 		m.taskQueue.Start()
 
 		return &m, nil

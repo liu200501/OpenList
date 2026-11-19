@@ -2,16 +2,29 @@ package meilisearch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/search/searcher"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/meilisearch/meilisearch-go"
 )
+
+// listObjects lists the current children of a parent path. The concrete
+// implementation is injected by internal/search (which can import internal/fs
+// without creating an import cycle) and is used by the task queue to re-read
+// the live file-system state when a queued update is consumed.
+var listObjects listObjectsFunc
+
+// SetListObjectsFunc installs the function used to list a directory's current
+// objects during async index updates.
+func SetListObjectsFunc(fn listObjectsFunc) {
+	listObjects = fn
+}
 
 type searchDocument struct {
 	// Document id, hash of the file path,
@@ -163,8 +176,10 @@ func (m *Meilisearch) getDocumentInPath(ctx context.Context, parent string, name
 	nodePathHash := hashPath(nodePath)
 	err := m.Client.Index(m.IndexUid).GetDocumentWithContext(ctx, nodePathHash, nil, &result)
 	if err != nil {
-		// return nil for documents that no exists
-		if err.(*meilisearch.Error).StatusCode == 404 {
+		// return nil for documents that do not exist. Use a safe assertion so
+		// an unexpected error type can never panic the task-queue goroutine.
+		var mErr *meilisearch.Error
+		if errors.As(err, &mErr) && mErr.StatusCode == http.StatusNotFound {
 			return nil, nil
 		}
 		return nil, err
@@ -222,21 +237,14 @@ func (m *Meilisearch) Clear(ctx context.Context) error {
 	return err
 }
 
-func (m *Meilisearch) getTaskStatus(ctx context.Context, taskUID int64) (meilisearch.TaskStatus, error) {
-	forTask, err := m.Client.WaitForTaskWithContext(ctx, taskUID, time.Second)
-	if err != nil {
-		return meilisearch.TaskStatusUnknown, err
-	}
-	return forTask.Status, nil
-}
-
-// EnqueueUpdate enqueues an update task to the task queue
-func (m *Meilisearch) EnqueueUpdate(parent string, objs []model.Obj) {
+// EnqueueUpdate enqueues an update for a parent path. The current object list
+// is intentionally not captured here: it is re-read from the file system when
+// the queue consumer runs, so queued updates never act on a stale snapshot.
+func (m *Meilisearch) EnqueueUpdate(parent string) {
 	if m.taskQueue == nil {
 		return
 	}
-
-	m.taskQueue.Enqueue(parent, objs)
+	m.taskQueue.Enqueue(parent)
 }
 
 // batchIndexWithTaskUID indexes documents and returns all taskUIDs
