@@ -25,6 +25,9 @@ type Addition struct {
 		// 新增：缩略图代理
 	ThumbnailProxyEnabled bool   `json:"thumbnail_proxy_enabled" type:"bool" default:"false" help:"启用缩略图代理：开启后，缩略图 URL 会替换为下方代理地址，解决 *.cmecloud.cn 直连不可达的问题"`
 	ThumbnailProxyURL     string `json:"thumbnail_proxy_url" type:"string" help:"缩略图代理地址前缀。代理服务需接收 ?url=原始缩略图URL 并转发，同时保持原始 Host 头以通过 AWS 签名校验。示例：https://your-proxy.com/proxy?url="`
+	// 跨账号秒转存：本存储作为目标账号，source_storage_id 指向源账号的另一个 139 存储 ID。
+	// 转存时源账号负责创建分享，本账号负责订阅并转存，两边各用各自的授权。
+	SourceStorageID string `json:"source_storage_id" type:"string" help:"跨账号秒转存：源账号的 139 存储 ID（数字）。留空则不启用。转存时源账号建分享、本账号订阅并转存，各用各的授权。"`
 }
 
 var config = driver.Config{

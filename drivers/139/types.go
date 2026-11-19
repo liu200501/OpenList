@@ -254,6 +254,75 @@ type ShareContentInfoResp struct {
 	} `json:"data"`
 }
 
+// ---- 跨账号分享转存相关类型 ----
+
+// CreateOutLinkResp 创建分享接口 IOutLink/getOutLink 的响应。
+type CreateOutLinkResp struct {
+	ResultCode string `json:"resultCode"`
+	Desc       string `json:"desc"`
+	Success    bool   `json:"success"`
+	Code       string `json:"code"`
+	Data       struct {
+		GetOutLinkResSet []struct {
+			ObjID        string `json:"objID"`
+			Passwd       string `json:"passwd"`
+			LinkID       string `json:"linkID"`
+			LinkURL      string `json:"linkUrl"`
+			FileName     string `json:"firstFileName"`
+			FileCount    int    `json:"fileCount"`
+		} `json:"getOutLinkResSet"`
+	} `json:"data"`
+}
+
+// CreateTransferTaskResp 发起转存 IBatchOprTask/createOuterLinkBatchOprTask 的响应。
+type CreateTransferTaskResp struct {
+	ResultCode string `json:"resultCode"`
+	Desc       string `json:"desc"`
+	Success    bool   `json:"success"`
+	Code       string `json:"code"`
+	Data       struct {
+		TaskID string `json:"taskID"`
+	} `json:"data"`
+}
+
+// TransferTaskDetail 查询转存任务 IBatchOprTask/queryBatchOprTaskDetail 的响应。
+// taskStatus: 1=进行中, 2=完成; resultCode=0 表示成功。
+type TransferTaskDetail struct {
+	ResultCode string `json:"resultCode"`
+	Desc       string `json:"desc"`
+	Success    bool   `json:"success"`
+	Code       string `json:"code"`
+	Data       struct {
+		ContentList struct {
+			IDRspInfo []struct {
+				SrcID  string `json:"srcId"`
+				RstID  string `json:"rstId"`
+				Reason string `json:"reason"`
+			} `json:"idRspInfo"`
+			Length string `json:"length"`
+		} `json:"contentList"`
+		CatalogList struct {
+			IDRspInfo []struct {
+				SrcID  string `json:"srcId"`
+				RstID  string `json:"rstId"`
+				Reason string `json:"reason"`
+			} `json:"idRspInfo"`
+			Length string `json:"length"`
+		} `json:"catalogList"`
+		BatchOprTask struct {
+			TaskID       string `json:"taskID"`
+			TaskType     int    `json:"taskType"`
+			TaskStatus   int    `json:"taskStatus"`
+			TaskResultCode int  `json:"taskResultCode"`
+			ResultCode   int    `json:"resultCode"`
+			Progress     int    `json:"progress"`
+			CreateTime   string `json:"createTime"`
+			StartTime    string `json:"startTime"`
+			EndTime      string `json:"endTime"`
+		} `json:"batchOprTask"`
+	} `json:"data"`
+}
+
 type QueryRoutePolicyResp struct {
 	Success bool   `json:"success"`
 	Code    string `json:"code"`
