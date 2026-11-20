@@ -1,7 +1,6 @@
 package handles
 
 import (
-	"errors"
 	"strconv"
 	"strings"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/transfer139"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 )
 
 // FsTransferShareReq 跨账号 139 秒转存请求。
