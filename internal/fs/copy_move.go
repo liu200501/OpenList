@@ -46,9 +46,16 @@ type FileTransferTask struct {
 	TaskData
 	TaskType taskType
 	groupID  string
+	// serverCopy 非 nil 时，Run 优先走服务端秒转存（如 139 跨账号分享转存），
+	// 不执行 Link→Put 字节流。仅用于 copy 类型。
+	serverCopy    ServerCopyRunner `json:"-"` // 函数不可持久化；重启恢复后降级为字节流复制
+	serverCopyTag string           // 任务描述，如 "139 跨账号秒转存"
 }
 
 func (t *FileTransferTask) GetName() string {
+	if t.serverCopy != nil && t.serverCopyTag != "" {
+		return fmt.Sprintf("%s: [%s](%s) to [%s](%s)", t.serverCopyTag, t.SrcStorageMp, t.SrcActualPath, t.DstStorageMp, t.DstActualPath)
+	}
 	return fmt.Sprintf("%s [%s](%s) to [%s](%s)", t.TaskType, t.SrcStorageMp, t.SrcActualPath, t.DstStorageMp, t.DstActualPath)
 }
 
@@ -69,6 +76,15 @@ func (t *FileTransferTask) Run() error {
 	t.ClearEndTime()
 	t.SetStartTime(time.Now())
 	defer func() { t.SetEndTime(time.Now()) }()
+
+	// 服务端秒转存：整批由远端完成，不走 Link→Put 字节流，也无需 AddTask/Done 配对。
+	if t.serverCopy != nil {
+		t.Status = t.serverCopyTag
+		return t.serverCopy(t.Ctx(), func(percent int) {
+			t.SetProgress(percent)
+		})
+	}
+
 	return t.RunWithNextTaskCallback(func(nextTask *FileTransferTask) error {
 		task_group.TransferCoordinator.AddTask(t.groupID, nil)
 		if t.TaskType == copy || t.TaskType == merge {
@@ -81,15 +97,24 @@ func (t *FileTransferTask) Run() error {
 }
 
 func (t *FileTransferTask) OnSucceeded() {
+	if t.serverCopy != nil { // 服务端秒转存未加入 TransferCoordinator，无需 Done
+		return
+	}
 	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), t.groupID, true)
 }
 
 func (t *FileTransferTask) OnFailed() {
+	if t.serverCopy != nil {
+		return
+	}
 	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), t.groupID, false)
 }
 
 func (t *FileTransferTask) SetRetry(retry int, maxRetry int) {
 	t.TaskData.SetRetry(retry, maxRetry)
+	if t.serverCopy != nil { // 服务端秒转存不参与 TransferCoordinator 分组
+		return
+	}
 	if retry == 0 &&
 		(len(t.groupID) == 0 || // 重启恢复
 			(t.GetErr() == nil && t.GetState() != tache.StatePending)) { // 手动重试
@@ -182,6 +207,34 @@ func transfer(ctx context.Context, taskType taskType, srcObjPath, dstDirPath, ds
 	dstStorage, dstDirActualPath, err := op.GetStorageAndActualPath(dstDirPath)
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed get dst storage")
+	}
+
+	// 服务端秒转存钩子（如 139 跨账号分享转存）：条件满足时构造一个走服务端的
+	// FileTransferTask 异步执行；否则 handled=false 无缝回退到下面的默认复制逻辑。
+	// 仅对 copy 生效（move 需删源、merge 需跳过已存在，均回退字节流）。
+	if serverCopyHook != nil && taskType == copy && ctx.Value(conf.NoTaskKey) == nil {
+		if handled, run, reason := serverCopyHook(ctx, taskType.String(),
+			srcObjPath, dstDirPath, dstName,
+			srcStorage, srcObjActualPath, dstStorage, dstDirActualPath); handled && run != nil {
+			t := &FileTransferTask{
+				TaskData: TaskData{
+					SrcStorage:    srcStorage,
+					DstStorage:    dstStorage,
+					SrcActualPath: srcObjActualPath,
+					DstActualPath: dstDirActualPath,
+					DstName:       dstName,
+					SrcStorageMp:  srcStorage.GetStorage().MountPath,
+					DstStorageMp:  dstStorage.GetStorage().MountPath,
+				},
+				TaskType:      taskType,
+				serverCopy:    run,
+				serverCopyTag: reason,
+			}
+			t.Creator, _ = ctx.Value(conf.UserKey).(*model.User)
+			t.ApiUrl = conf.GetApiUrl(ctx)
+			CopyTaskManager.Add(t)
+			return t, nil
+		}
 	}
 
 	if srcStorage.GetStorage() == dstStorage.GetStorage() {

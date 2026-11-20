@@ -1,24 +1,24 @@
 package handles
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
-	_139 "github.com/OpenListTeam/OpenList/v4/drivers/139"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/transfer139"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
 )
 
 // FsTransferShareReq 跨账号 139 秒转存请求。
 //
-// 账号 A（源）= 由目标存储的 source_storage_id 指向的另一个 139 存储；
-// 账号 B（目标）= dst_path 所在的 139 存储。
+// 账号 A（源）= 由目标存储（或其底层 139）的 source_storage_id 指向的另一个 139 存储；
+// 账号 B（目标）= dst_path 所在的 139 存储（可套 crypt）。
 //
 // source_folder_ids / source_file_ids 是源账号云盘里的**内容 ID**（caID/coID），
 // 可通过在源存储下列目录得到的对象 ID 取得。二者至少填一个。
@@ -28,15 +28,10 @@ type FsTransferShareReq struct {
 	SourceFileIDs   []string `json:"source_file_ids" form:"source_file_ids"`
 }
 
-// FsTransferShare 跨账号分享秒转存。
+// FsTransferShare 跨账号 139 秒转存。
 //
-// 流程（全程服务端，零字节上传/下载）：
-//   1. 源账号 139 存储创建分享
-//   2. 目标账号订阅分享
-//   3. 目标账号把分享内容转存到 dst_path
-//   4. 轮询任务直到完成
-//
-// 需要登录用户（外部脚本用全局 token 调用即可被识别为 admin）。
+// 目标 dst_path 可以是裸 139 存储，也可以是套在 139 上的 crypt 存储；
+// 源的 source_storage_id 指向的存储同样支持这两种形态。全程在云端完成，零字节下载。
 func FsTransferShare(c *gin.Context) {
 	var req FsTransferShareReq
 	if err := c.ShouldBind(&req); err != nil {
@@ -54,7 +49,7 @@ func FsTransferShare(c *gin.Context) {
 		return
 	}
 
-	// 目标路径权限校验
+	// 目标路径权限校验（基于虚拟路径）
 	dstDir, err := user.JoinPath(req.DstPath)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
@@ -70,20 +65,25 @@ func FsTransferShare(c *gin.Context) {
 		return
 	}
 
-	// 目标驱动（账号 B）
+	// 目标：解析到裸 139 或 crypt 底层的 139（含目录 ID / 名称）。
 	dstDriver, dstActualPath, err := op.GetStorageAndActualPath(dstDir)
 	if err != nil {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	dst139, ok := dstDriver.(*_139.Yun139)
-	if !ok {
-		common.ErrorStrResp(c, "destination storage is not a 139 storage", 400)
+	dstResolved, err := transfer139.Resolve(c.Request.Context(), dstDir, dstDriver, dstActualPath)
+	if err != nil {
+		common.ErrorStrResp(c, "destination is not a 139 (or crypt-wrapped 139) storage: "+err.Error(), 400)
 		return
 	}
+	if !dstResolved.IsDir {
+		common.ErrorStrResp(c, "dst_path is not a directory", 400)
+		return
+	}
+	dst139 := dstResolved.Yun139
 
-	// 源驱动（账号 A）：从目标存储的 source_storage_id 解析
-	srcIDStr := strings.TrimSpace(dst139.Addition.SourceStorageID)
+	// 源：从目标 139 的 source_storage_id 解析源存储，再取底层 139（支持 crypt 包装的源存储）。
+	srcIDStr := strings.TrimSpace(dst139.SourceStorageID)
 	if srcIDStr == "" {
 		common.ErrorStrResp(c, "source_storage_id is not configured on destination 139 storage", 400)
 		return
@@ -103,9 +103,13 @@ func FsTransferShare(c *gin.Context) {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	src139, ok := srcDriver.(*_139.Yun139)
-	if !ok {
-		common.ErrorStrResp(c, "source storage is not a 139 storage", 400)
+	src139, err := transfer139.UnderlyingYun139(srcDriver)
+	if err != nil {
+		common.ErrorStrResp(c, "source storage is not a 139 (or crypt-wrapped 139) storage: "+err.Error(), 400)
+		return
+	}
+	if src139.IsShareType() {
+		common.ErrorStrResp(c, "source 139 share storage cannot create shares", 400)
 		return
 	}
 	if src139.UserDomainID == "" || dst139.UserDomainID == "" {
@@ -113,21 +117,10 @@ func FsTransferShare(c *gin.Context) {
 		return
 	}
 
-	// 目标目录必须是 139 里的文件夹；取其对象 ID 作为 newCatalogID。
-	dstObj, err := op.Get(c.Request.Context(), dstDriver, dstActualPath)
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if !dstObj.IsDir() {
-		common.ErrorStrResp(c, "dst_path is not a directory", 400)
-		return
-	}
-	dstDirID := dstObj.GetID()
+	dstDirID, dstDirName := dstResolved.ID, dstResolved.Name
 	if dstDirID == "" || dstDirID == "/" {
 		dstDirID = "/"
 	}
-	dstDirName := dstObj.GetName()
 	if dstDirName == "" || dstDirName == "/" {
 		dstDirName = "全部文件"
 	}

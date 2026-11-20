@@ -9,6 +9,7 @@ import (
 	_ "github.com/OpenListTeam/OpenList/v4/internal/archive"
 	_ "github.com/OpenListTeam/OpenList/v4/internal/indexwatch"
 	_ "github.com/OpenListTeam/OpenList/v4/internal/offline_download"
+	_ "github.com/OpenListTeam/OpenList/v4/internal/transfer139"
 	"github.com/spf13/cobra"
 )
 

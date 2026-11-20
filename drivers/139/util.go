@@ -72,6 +72,11 @@ func (d *Yun139) isShare() bool {
 	return d.Type == MetaShare
 }
 
+// IsShareType 报告该存储是否为分享（只读）类型。供跨账号秒转存等外部逻辑判断。
+func (d *Yun139) IsShareType() bool {
+	return d.isShare()
+}
+
 func encodeURIComponent(str string) string {
 	r := url.QueryEscape(str)
 	r = strings.Replace(r, "+", "%20", -1)
