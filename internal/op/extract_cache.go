@@ -31,13 +31,14 @@ import (
 // 缓存只服务于「内容不经常变化」的预览场景；压缩包被替换后最多 TTL 时间
 // 内仍可能读到旧内容，这与归档 meta/list 的缓存行为一致。
 const (
-	extractFileTTL        = 10 * time.Minute
+	extractFileTTL        = 30 * time.Minute
 	extractFileSweepEvery = time.Minute
 	extractFilePrefix     = "openlist-extract-"
 )
 
 // 缓存占用磁盘上限，超过后按最旧优先淘汰。用变量以便在单元测试中缩小。
-var extractFileMaxBytes int64 = 512 * 1024 * 1024 // 512 MiB
+// 图片预加载量调大后需要更大的缓存，否则旧图刚预加载就会被淘汰。
+var extractFileMaxBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GiB
 
 type extractedFile struct {
 	path      string

@@ -129,8 +129,8 @@ func InitialSettings() []model.SettingItem {
 		{Key: conf.AudioTypes, Value: "mp3,flac,ogg,m4a,wav,opus,wma", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},
 		{Key: conf.VideoTypes, Value: "mp4,mkv,avi,mov,rmvb,webm,flv,m3u8", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},
 		{Key: conf.ImageTypes, Value: "jpg,tiff,jpeg,png,gif,bmp,svg,ico,swf,webp,avif", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},
-		// 图片预览预加载数量：切换图片时前后各预加载的张数，默认 2。
-		{Key: "image_preload_count", Value: "2", Type: conf.TypeNumber, Group: model.PREVIEW},
+		// 图片预览预加载数量：切换图片时前后各预加载的张数，默认 10。
+		{Key: "image_preload_count", Value: "10", Type: conf.TypeNumber, Group: model.PREVIEW},
 		//{Key: conf.OfficeTypes, Value: "doc,docx,xls,xlsx,ppt,pptx", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},
 		{Key: conf.ProxyTypes, Value: "m3u8,url", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},
 		{Key: conf.ProxyIgnoreHeaders, Value: "authorization,referer", Type: conf.TypeText, Group: model.PREVIEW, Flag: model.PRIVATE},

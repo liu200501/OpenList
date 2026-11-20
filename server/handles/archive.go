@@ -389,7 +389,7 @@ func proxyInternalExtract(c *gin.Context, rc io.ReadCloser, size int64, fileName
 	etag := "\"" + hex.EncodeToString(sum[:]) + "\""
 	headers := map[string]string{
 		"Referrer-Policy": "no-referrer",
-		"Cache-Control":   "public, max-age=600",
+		"Cache-Control":   "public, max-age=1800",
 		"ETag":            etag,
 	}
 	if c.Request.Header.Get("If-None-Match") == etag {

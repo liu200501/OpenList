@@ -11,6 +11,9 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -153,6 +156,39 @@ func syncFineFavoriteStorages(ctx context.Context, parent model.Storage) {
 			log.Errorf("[fine-favorite] failed to delete %s: %v", mount, err)
 		}
 	}
+}
+
+// FineFavoriteFolder 是右键收藏子菜单里的一项二级收藏夹。
+type FineFavoriteFolder struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mount_path"`
+}
+
+// ListFineFavoriteFolders 返回 /收藏 这个 Alias 配置的二级收藏夹列表。
+// 严格按 fine_favorites 文本里的行顺序返回，不含根目录 /收藏 本身，
+// 也不列目录里的文件——右键子菜单只展示可收藏到的收藏夹。
+func ListFineFavoriteFolders(c *gin.Context) {
+	target, _, err := findFavoriteStorage("")
+	if err != nil {
+		common.ErrorResp(c, err, 404)
+		return
+	}
+	var addition alias.Addition
+	if target.Addition != "" {
+		if err := json.Unmarshal([]byte(target.Addition), &addition); err != nil {
+			common.ErrorResp(c, errors.WithMessage(err, "failed to parse alias addition"), 500)
+			return
+		}
+	}
+	names := parseFineFavoriteNames(addition.FineFavorites)
+	folders := make([]FineFavoriteFolder, 0, len(names))
+	for _, name := range names {
+		folders = append(folders, FineFavoriteFolder{
+			Name:      name,
+			MountPath: normalizeFineFavMount(fineFavFavoriteMount + "/" + name),
+		})
+	}
+	common.SuccessResp(c, folders)
 }
 
 // removeAllFineFavoriteStorages 在删除 /收藏 存储时清理其自动创建的子存储。
