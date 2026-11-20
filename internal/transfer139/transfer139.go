@@ -164,18 +164,18 @@ func tryServerCopy(
 		dstDirName = "全部文件"
 	}
 
-	run := func(runCtx context.Context, progress func(int)) error {
+	run := func(runCtx context.Context, progress func(float64)) error {
 		// 用一个不受请求取消影响的上下文执行远端调用。
 		base := context.Background()
 		if runCtx != nil {
 			base = context.WithoutCancel(runCtx)
 		}
-		progress(10)
+		progress(10.0)
 		result, err := dstYun.SaveShareToPath(srcYun, folderIDs, fileIDs, dstDirID, dstDirName)
 		if err != nil {
 			return fmt.Errorf("139 server-side transfer failed: %w", err)
 		}
-		progress(100)
+		progress(100.0)
 		// 刷新目标目录缓存，让前端立即看到转存结果（失败不影响主流程）。
 		_, _ = op.List(base, dstStorage, dstDirActualPath, model.ListArgs{Refresh: true})
 		log.Infof("[transfer139] server-side transfer done: task=%s link=%s folders=%d files=%d (viaCrypt src=%v dst=%v)",

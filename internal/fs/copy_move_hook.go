@@ -20,7 +20,7 @@ import (
 )
 
 // ServerCopyRunner 执行一次服务端转存；progress 用于上报进度（0-100），可为 nil。
-type ServerCopyRunner func(ctx context.Context, progress func(percent int)) error
+type ServerCopyRunner func(ctx context.Context, progress func(percent float64)) error
 
 // ServerCopyHook 判断能否用服务端秒转存接管一次跨存储复制。
 //

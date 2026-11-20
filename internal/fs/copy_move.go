@@ -80,7 +80,7 @@ func (t *FileTransferTask) Run() error {
 	// 服务端秒转存：整批由远端完成，不走 Link→Put 字节流，也无需 AddTask/Done 配对。
 	if t.serverCopy != nil {
 		t.Status = t.serverCopyTag
-		return t.serverCopy(t.Ctx(), func(percent int) {
+		return t.serverCopy(t.Ctx(), func(percent float64) {
 			t.SetProgress(percent)
 		})
 	}
