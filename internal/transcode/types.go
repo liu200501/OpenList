@@ -128,6 +128,10 @@ type Job struct {
 	// 否则单个匿名访客就能占满所有匿名转码配额。
 	OwnerID string `json:"-"`
 
+	// VideoTranscode / AudioTranscode 记录播放端齿轮开关状态，用于区分同一文件的不同转码任务。
+	VideoTranscode bool `json:"-"`
+	AudioTranscode bool `json:"-"`
+
 	// 运行时
 	Status       JobStatus `json:"status"`
 	WorkerID     string    `json:"worker_id"`

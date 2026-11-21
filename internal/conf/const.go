@@ -208,8 +208,8 @@ const (
 
 	// transcode (云端/本地 FFmpeg 转码)
 	TranscodeEnabled            = "transcode_enabled"              // 总开关，默认关
-	TranscodeVideoEnabled       = "transcode_video_enabled"        // 视频轨转码开关，默认开；关掉则视频流 copy
-	TranscodeAudioEnabled       = "transcode_audio_enabled"        // 音频轨转码开关，默认开；关掉则音频流 copy
+	TranscodeScope              = "transcode_scope"                // 转码范围：all=全部 / paths=仅指定文件夹
+	TranscodeScopePaths         = "transcode_scope_paths"          // 允许转码的文件夹路径（换行/逗号分隔，前缀匹配）
 	TranscodeMinSizeGB          = "transcode_min_size_gb"          // 文件大于多少 GB 才转码
 	TranscodeMinBitrateMbps     = "transcode_min_bitrate_mbps"     // 视频码率高于多少 Mbps 才转码（0=不限）
 	TranscodeSourceCodecs       = "transcode_source_codecs"        // 仅对这些源编码进行转码

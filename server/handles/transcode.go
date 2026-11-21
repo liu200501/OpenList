@@ -84,12 +84,16 @@ func TranscodePlay(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Path string `json:"path" binding:"required"`
+		Path           string `json:"path" binding:"required"`
+		VideoTranscode *bool  `json:"video_transcode"` // 播放端齿轮开关：nil=默认开启
+		AudioTranscode *bool  `json:"audio_transcode"` // 播放端齿轮开关：nil=默认开启
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	videoOn := req.VideoTranscode == nil || *req.VideoTranscode
+	audioOn := req.AudioTranscode == nil || *req.AudioTranscode
 	// 该路由挂在 Auth(true)（允许被禁用的访客通过）之下，必须在这里自行拒绝，
 	// 否则关闭访客后匿名请求仍能触发 ffprobe/ffmpeg 并占用转码缓存。
 	user := mediaUser(c)
@@ -111,6 +115,7 @@ func TranscodePlay(c *gin.Context) {
 		return
 	}
 	dec := transcode.Decide(transcode.DecideRequest{
+		Path:     req.Path,
 		FileName: obj.GetName(),
 		FileSize: obj.GetSize(),
 	})
@@ -136,7 +141,7 @@ func TranscodePlay(c *gin.Context) {
 	}
 
 	// 同一用户重复请求同一文件：直接复用进行中的任务，避免重复 ffprobe 与重复转码。
-	if exist, ok := mgr.Scheduler.FindReusable(ownerID, req.Path); ok {
+	if exist, ok := mgr.Scheduler.FindReusable(ownerID, req.Path, videoOn, audioOn); ok {
 		respondTranscodeJob(c, apiURL, exist)
 		return
 	}
@@ -178,6 +183,8 @@ func TranscodePlay(c *gin.Context) {
 	job.Path = req.Path
 	job.OwnerID = ownerID
 	job.SourceURL = sourceURL
+	job.VideoTranscode = videoOn
+	job.AudioTranscode = audioOn
 	// 配额预检：ProbeSource 会起一个最长 30s 的 ffprobe 子进程，
 	// 不能等探测完才告诉用户「已有 3 个活跃任务」。最终判定仍由 SubmitLimited 原子完成。
 	if err := mgr.Scheduler.Capacity(ownerID); err != nil {
@@ -205,7 +212,7 @@ func TranscodePlay(c *gin.Context) {
 	job.Probe = probe
 	// 按探测结果决定输出集合：单轨仍是历史的一档混流；多轨则拆成
 	// 每条视频轨一条纯视频 rendition + 每条音轨一条 AAC 音频 rendition。
-	job.Profiles = transcode.BuildRenditions(probe)
+	job.Profiles = transcode.BuildRenditions(probe, videoOn, audioOn)
 	job.Output = transcode.BuildOutputSpec()
 	timeoutMin := setting.GetInt(conf.TranscodeJobTimeoutMin, 120)
 	job.Deadline = time.Now().Add(time.Duration(timeoutMin) * time.Minute).Unix()

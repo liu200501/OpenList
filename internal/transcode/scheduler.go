@@ -67,17 +67,26 @@ func isActiveStatus(st JobStatus) bool {
 	return st == JobPending || st == JobRunning || st == JobReady
 }
 
-// FindReusable 查找同一用户对同一路径、仍在进行中的任务，用于去重复用。
-func (s *Scheduler) FindReusable(ownerID string, path string) (*Job, bool) {
+// FindReusable 查找同一用户对同一路径、同一转码开关组合、仍在进行中的任务，用于去重复用。
+func (s *Scheduler) FindReusable(ownerID string, path string, videoOn, audioOn bool) (*Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.findReusableLocked(ownerID, path)
+	for _, j := range s.jobs {
+		if j.OwnerID == ownerID && j.Path == path &&
+			j.VideoTranscode == videoOn && j.AudioTranscode == audioOn &&
+			isActiveStatus(j.GetStatus()) {
+			return j, true
+		}
+	}
+	return nil, false
 }
 
-func (s *Scheduler) findReusableLocked(ownerID string, path string) (*Job, bool) {
-	for _, j := range s.jobs {
-		if j.OwnerID == ownerID && j.Path == path && isActiveStatus(j.GetStatus()) {
-			return j, true
+func (s *Scheduler) findReusableLocked(j *Job) (*Job, bool) {
+	for _, exist := range s.jobs {
+		if exist.OwnerID == j.OwnerID && exist.Path == j.Path &&
+			exist.VideoTranscode == j.VideoTranscode && exist.AudioTranscode == j.AudioTranscode &&
+			isActiveStatus(exist.GetStatus()) {
+			return exist, true
 		}
 	}
 	return nil, false
@@ -91,7 +100,7 @@ func (s *Scheduler) findReusableLocked(ownerID string, path string) (*Job, bool)
 func (s *Scheduler) SubmitLimited(j *Job) (*Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exist, ok := s.findReusableLocked(j.OwnerID, j.Path); ok {
+	if exist, ok := s.findReusableLocked(j); ok {
 		return exist, true, nil
 	}
 	if len(s.pending) >= MaxPendingJobs {
