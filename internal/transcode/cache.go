@@ -36,10 +36,10 @@ type JobCache struct {
 
 // Cache 全局切片缓存
 type Cache struct {
-	rootDir   string
-	maxBytes  int64
-	mu        sync.RWMutex
-	jobs      map[string]map[string]*JobCache // jobID -> profile -> cache
+	rootDir  string
+	maxBytes int64
+	mu       sync.RWMutex
+	jobs     map[string]map[string]*JobCache // jobID -> profile -> cache
 }
 
 func NewCache(rootDir string, maxGB int64) *Cache {
@@ -349,11 +349,19 @@ func (c *Cache) BuildPlaylist(jobID, profile string, segDur int, completed bool,
 	return b.String()
 }
 
-// MasterPlaylist 多档位主 m3u8
-func (c *Cache) MasterPlaylist(profiles []Profile, baseURL string) string {
+// MasterPlaylist 主 m3u8。
+//
+// 单档（音视频混流）：直接输出一条 STREAM-INF，保持历史行为。
+// 多轨（MKV 多视频轨/多音轨）：音频轨输出为 EXT-X-MEDIA 独立音频组，
+// 视频轨各自输出一条 STREAM-INF，播放器即可：
+//   - 通过 audioTracks（或 Safari 的 audioTrack）切换音轨
+//   - 通过 level / variant 切换视频轨
+func (c *Cache) MasterPlaylist(job *Job, baseURL string) string {
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n")
-	for _, p := range profiles {
+
+	if len(job.Profiles) <= 1 {
+		p := job.Profiles[0]
 		bw, _ := parseBitrate(p.VideoBitrate)
 		ab, _ := parseBitrate(p.AudioBitrate)
 		// 【关键修复】根据实际编码动态生成 codec 字符串
@@ -362,8 +370,87 @@ func (c *Cache) MasterPlaylist(profiles []Profile, baseURL string) string {
 		codecs := buildCodecString(p)
 		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=\"%s\"\n", bw+ab, codecs))
 		b.WriteString(fmt.Sprintf("%s%s/playlist.m3u8\n", baseURL, p.Name))
+		return b.String()
+	}
+
+	var audios, videos []Profile
+	for _, p := range job.Profiles {
+		if p.IsAudio() {
+			audios = append(audios, p)
+		} else if p.IsVideo() {
+			videos = append(videos, p)
+		}
+	}
+
+	// 音频组：每条音轨一条纯音频 playlist
+	maxAudioBr := int64(0)
+	for i, p := range audios {
+		ab, _ := parseBitrate(p.AudioBitrate)
+		if ab > maxAudioBr {
+			maxAudioBr = ab
+		}
+		var attrs strings.Builder
+		attrs.WriteString("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\"")
+		attrs.WriteString(fmt.Sprintf(",NAME=\"%s\"", hlsSafeName(trackDisplayName(p, i, "音轨"))))
+		attrs.WriteString(",CHANNELS=\"2\",AUTOSELECT=YES")
+		if i == 0 {
+			attrs.WriteString(",DEFAULT=YES")
+		}
+		if p.Language != "" {
+			attrs.WriteString(fmt.Sprintf(",LANGUAGE=\"%s\"", hlsSafeName(p.Language)))
+		}
+		attrs.WriteString(fmt.Sprintf(",URI=\"%s%s/playlist.m3u8\"\n", baseURL, p.Name))
+		b.WriteString(attrs.String())
+	}
+
+	for i, p := range videos {
+		bw, _ := parseBitrate(p.VideoBitrate)
+		codecs := buildCodecString(p)
+		var attrs strings.Builder
+		attrs.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=\"%s\"", bw+maxAudioBr, codecs))
+		if len(audios) > 0 {
+			attrs.WriteString(",AUDIO=\"aud\"")
+		}
+		attrs.WriteString(fmt.Sprintf(",NAME=\"%s\"\n", hlsSafeName(trackDisplayName(p, i, "视频轨"))))
+		b.WriteString(attrs.String())
+		b.WriteString(fmt.Sprintf("%s%s/playlist.m3u8\n", baseURL, p.Name))
 	}
 	return b.String()
+}
+
+// hlsSafeName 清理放进 m3u8 属性值里的字符串，避免引号/换行破坏 playlist 结构。
+func hlsSafeName(s string) string {
+	s = strings.NewReplacer("\"", "'", "\r", " ", "\n", " ").Replace(s)
+	if len(s) > 40 {
+		s = s[:40]
+	}
+	return s
+}
+
+// trackDisplayName 音轨/视频轨在播放器菜单里显示的名字。
+func trackDisplayName(p Profile, idx int, fallback string) string {
+	if p.Title != "" {
+		if p.Language != "" {
+			return p.Title + " (" + p.Language + ")"
+		}
+		return p.Title
+	}
+	if p.Language != "" {
+		return p.Language + " " + strconv.Itoa(idx+1)
+	}
+	return fallback + " " + strconv.Itoa(idx+1)
+}
+
+// JobDir 返回某个 job 的根目录（用于放字幕等非切片文件），并确保存在。
+func (c *Cache) JobDir(jobID string) (string, error) {
+	if !jobIDRe.MatchString(jobID) {
+		return "", ErrInvalidJobID
+	}
+	full := filepath.Join(c.rootDir, jobID)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		return "", err
+	}
+	return full, nil
 }
 
 // buildCodecString 根据 Profile 生成 HLS CODECS 属性字符串

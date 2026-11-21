@@ -35,3 +35,6 @@ output/
 
 .VSCodeCounter
 *.syso
+
+# Local development runtime data
+.devdata/

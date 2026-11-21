@@ -177,7 +177,9 @@ func (r *LocalRunner) runJob(job *Job) {
 
 	// 【智能调度】如果探测到了视频总时长，启用 chunk 模式（按需分段并发转码）
 	// 否则回退到旧的"一次性整段"模式（兼容 ffprobe 失败的场景）
-	if job.Probe.Duration > 0 && r.mgr.Chunks != nil {
+	// 多轨模式（多音轨/多视频轨）走整段一次性转码：chunk 模式的切片编号与
+	// 多路输出（视频 + 多条音轨）难以对齐，按需调度收益也不如对齐重要。
+	if job.Probe.Duration > 0 && r.mgr.Chunks != nil && len(job.Profiles) == 1 {
 		r.runJobByChunks(ctx, job, profile, outDir)
 		return
 	}
@@ -312,87 +314,109 @@ func (r *LocalRunner) watchSegments(job *Job, profile Profile, dir string, stop 
 }
 
 func (r *LocalRunner) scanAndPublish(job *Job, profile Profile, dir string, finalScan bool) {
-	jc, err := r.mgr.Cache.getOrCreate(job.ID, profile.Name)
-	if err != nil {
-		return
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
+	defaultDur := float64(setting.GetInt(conf.TranscodeSegmentDuration, 6))
+	multi := len(job.Profiles) > 1
 	type segFile struct {
 		seq  int
 		path string
 		size int64
 	}
-	var segs []segFile
-	for _, e := range entries {
-		if e.IsDir() {
+	for _, p := range job.Profiles {
+		// 单档模式沿用 seg-%d.ts；多轨模式每个 rendition 自带前缀 <name>-seg-%d.ts
+		prefix := "seg-"
+		if multi {
+			prefix = p.Name + "-seg-"
+		}
+		var segs []segFile
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".ts") {
+				continue
+			}
+			seq, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".ts"))
+			if err != nil {
+				continue
+			}
+			fi, err := e.Info()
+			if err != nil {
+				continue
+			}
+			segs = append(segs, segFile{seq: seq, path: filepath.Join(dir, name), size: fi.Size()})
+		}
+		if len(segs) == 0 {
 			continue
 		}
-		name := e.Name()
-		if !strings.HasPrefix(name, "seg-") || !strings.HasSuffix(name, ".ts") {
-			continue
-		}
-		numStr := strings.TrimSuffix(strings.TrimPrefix(name, "seg-"), ".ts")
-		seq, err := strconv.Atoi(numStr)
+		sort.Slice(segs, func(i, j int) bool { return segs[i].seq < segs[j].seq })
+
+		jc, err := r.mgr.Cache.getOrCreate(job.ID, p.Name)
 		if err != nil {
 			continue
 		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		segs = append(segs, segFile{seq: seq, path: filepath.Join(dir, name), size: fi.Size()})
-	}
-	sort.Slice(segs, func(i, j int) bool { return segs[i].seq < segs[j].seq })
-
-	// 【优化】解析 ffmpeg 写出的 playlist.m3u8 获取每个切片的真实时长
-	// 避免硬编码 segDur 导致 HLS.js 显示总时长不准确
-	realDurations := parseFFmpegPlaylistDurations(filepath.Join(dir, "playlist.m3u8"))
-
-	// ffmpeg 在写入 .ts 时是边写边写,稳妥起见仅登记除最后一片以外的切片(最后一片可能未写完)
-	limit := len(segs)
-	if !finalScan && limit > 0 {
-		limit--
-	}
-	defaultDur := float64(setting.GetInt(conf.TranscodeSegmentDuration, 6))
-	for i := 0; i < limit; i++ {
-		s := segs[i]
-		jc.mu.RLock()
-		_, exists := jc.segments[s.seq]
-		jc.mu.RUnlock()
-		if exists {
-			continue
-		}
-		// 优先用 ffmpeg playlist 中的真实时长
-		dur := defaultDur
-		if d, ok := realDurations[s.seq]; ok && d > 0 {
-			dur = d
-		}
-		// 直接登记，不复制（已经在 cache 目录里了）
-		jc.mu.Lock()
-		jc.segments[s.seq] = &SegmentInfo{Seq: s.seq, Duration: dur, Size: s.size, Path: s.path}
-		var toClose []chan struct{}
-		for sk, chs := range jc.waiters {
-			if sk <= s.seq {
-				toClose = append(toClose, chs...)
-				delete(jc.waiters, sk)
+		// 【续跑修复】idle 超时 kill 后再次被 playlist 请求激活时，readyCh 会被重置，
+		// 而 seg-0 早已登记在 cache 里，下面的去重分支会直接 continue，永远不会触发
+		// MarkReady，导致 playlist 一直等到 30s 超时返回 504。这里补一次就绪信号。
+		if !p.IsAudio() {
+			jc.mu.RLock()
+			_, hasZero := jc.segments[0]
+			jc.mu.RUnlock()
+			if hasZero {
+				job.MarkReady()
 			}
 		}
-		jc.mu.Unlock()
-		for _, ch := range toClose {
-			close(ch)
+		// 解析 ffmpeg 写出的 playlist 获取每个切片的真实时长
+		playlistPath := filepath.Join(dir, "playlist.m3u8")
+		if multi {
+			playlistPath = filepath.Join(dir, p.Name+".m3u8")
 		}
-		// 第一片就绪 → 通知 job ready
-		if s.seq == 0 {
-			job.MarkReady()
+		realDurations := parseFFmpegPlaylistDurations(playlistPath)
+
+		// ffmpeg 边写边写，稳妥起见仅登记除最后一片以外的切片（最后一片可能未写完）
+		limit := len(segs)
+		if !finalScan && limit > 0 {
+			limit--
 		}
-	}
-	if finalScan {
-		jc.mu.Lock()
-		jc.final = true
-		jc.mu.Unlock()
+		for i := 0; i < limit; i++ {
+			s := segs[i]
+			jc.mu.RLock()
+			_, exists := jc.segments[s.seq]
+			jc.mu.RUnlock()
+			if exists {
+				continue
+			}
+			dur := defaultDur
+			if d, ok := realDurations[s.seq]; ok && d > 0 {
+				dur = d
+			}
+			jc.mu.Lock()
+			jc.segments[s.seq] = &SegmentInfo{Seq: s.seq, Duration: dur, Size: s.size, Path: s.path}
+			var toClose []chan struct{}
+			for sk, chs := range jc.waiters {
+				if sk <= s.seq {
+					toClose = append(toClose, chs...)
+					delete(jc.waiters, sk)
+				}
+			}
+			jc.mu.Unlock()
+			for _, ch := range toClose {
+				close(ch)
+			}
+			// 视频/混流档的第一片就绪 → 通知 job ready（音频 rendition 不参与就绪判定）
+			if s.seq == 0 && (p.Kind == "video" || p.Kind == "muxed" || p.Kind == "") {
+				job.MarkReady()
+			}
+		}
+		if finalScan {
+			jc.mu.Lock()
+			jc.final = true
+			jc.mu.Unlock()
+		}
 	}
 }
 
@@ -490,8 +514,13 @@ func parseFFmpegPlaylistDurations(path string) map[int]float64 {
 			}
 			continue
 		}
-		if strings.HasSuffix(line, ".ts") && strings.HasPrefix(line, "seg-") {
-			numStr := strings.TrimSuffix(strings.TrimPrefix(line, "seg-"), ".ts")
+		if strings.HasSuffix(line, ".ts") {
+			// 兼容单档 seg-0.ts 与多轨 <rendition>-seg-0.ts 两种命名
+			idx := strings.LastIndex(line, "seg-")
+			if idx < 0 {
+				continue
+			}
+			numStr := strings.TrimSuffix(line[idx+len("seg-"):], ".ts")
 			if seq, err := strconv.Atoi(numStr); err == nil && pendingDur > 0 {
 				out[seq] = pendingDur
 			}
@@ -513,8 +542,95 @@ func parseFFmpegPlaylistDurations(path string) map[int]float64 {
 // 当 Probe.Duration 不可用时，LocalRunner.runJob 会回退到这条路径。
 func buildFFmpegArgs(job *Job, profile Profile, segPattern, playlistPath string) []string {
 	segDur := setting.GetInt(conf.TranscodeSegmentDuration, 6)
+	// 多轨模式：一个 ffmpeg 进程同时输出「每条视频轨一个纯视频 rendition」
+	// 和「每条音轨一个纯 AAC audio rendition」，由 master playlist 组织切换。
+	if len(job.Profiles) > 1 {
+		return buildMultiTrackArgs(job, segDur, filepath.Dir(segPattern))
+	}
 	// startTime=0, duration=0(=不限) 表示整段转码；startSeq=0
 	return buildFFmpegArgsCommon(job, profile, segDur, 0, 0, 0, segPattern, playlistPath)
+}
+
+// buildMultiTrackArgs 构造多轨转码命令行：
+//   - 视频：仅做分辨率缩放 + 码率控制，统一输出 H.264（保证浏览器可解），不带音频
+//   - 音频：每条音轨单独一条纯音频 rendition，统一重编码为 AAC 立体声 48kHz
+//
+// 输出目录中会生成 v0-seg-%d.ts / a0-seg-%d.ts 以及对应的 v0.m3u8 / a0.m3u8。
+func buildMultiTrackArgs(job *Job, segDur int, outDir string) []string {
+	if segDur <= 0 {
+		segDur = 6
+	}
+	first := job.Profiles[0]
+	hw := strings.ToLower(first.HWAccel)
+	args := []string{"-y", "-loglevel", "warning"}
+	switch hw {
+	case "nvenc":
+		args = append(args, "-hwaccel", "cuda")
+	case "qsv":
+		args = append(args, "-hwaccel", "qsv")
+	case "vaapi":
+		args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-vaapi_device", "/dev/dri/renderD128")
+	case "amf":
+		args = append(args, "-hwaccel", "d3d11va")
+	case "videotoolbox":
+		args = append(args, "-hwaccel", "videotoolbox")
+	case "auto":
+		args = append(args, "-hwaccel", "auto")
+	}
+	args = append(args, "-protocol_whitelist", ProtocolWhitelistFor(job.SourceURL), "-i", job.SourceURL)
+
+	gop := segDur * 25
+	for _, p := range job.Profiles {
+		switch {
+		case p.IsVideo():
+			vcodec := pickEncoder(p.VideoCodec, hw)
+			args = append(args, "-map", fmt.Sprintf("0:v:%d", p.TrackIndex), "-c:v", vcodec)
+			if strings.Contains(vcodec, "264") {
+				args = append(args, "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p")
+			}
+			if p.VideoBitrate != "" {
+				args = append(args, "-b:v", p.VideoBitrate,
+					"-maxrate", p.VideoBitrate, "-bufsize", p.VideoBitrate)
+			}
+			if p.Scale != "" {
+				switch hw {
+				case "vaapi":
+					args = append(args, "-vf", "scale_vaapi="+p.Scale)
+				case "qsv":
+					args = append(args, "-vf", "scale_qsv="+p.Scale)
+				default:
+					args = append(args, "-vf", "scale="+p.Scale)
+				}
+			}
+			args = append(args, "-preset", defaultPresetFor(vcodec), "-an",
+				"-g", strconv.Itoa(gop),
+				"-keyint_min", strconv.Itoa(gop),
+				"-sc_threshold", "0",
+				"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", segDur),
+				"-f", "hls",
+				"-hls_time", strconv.Itoa(segDur),
+				"-hls_playlist_type", "vod",
+				"-hls_segment_filename", filepath.Join(outDir, p.Name+"-seg-%d.ts"),
+				"-hls_flags", "independent_segments+temp_file",
+				filepath.Join(outDir, p.Name+".m3u8"),
+			)
+		case p.IsAudio():
+			ab := p.AudioBitrate
+			if ab == "" {
+				ab = "160k"
+			}
+			args = append(args, "-map", fmt.Sprintf("0:a:%d", p.TrackIndex),
+				"-c:a", "aac", "-b:a", ab, "-ac", "2", "-ar", "48000", "-vn",
+				"-f", "hls",
+				"-hls_time", strconv.Itoa(segDur),
+				"-hls_playlist_type", "vod",
+				"-hls_segment_filename", filepath.Join(outDir, p.Name+"-seg-%d.ts"),
+				"-hls_flags", "independent_segments+temp_file",
+				filepath.Join(outDir, p.Name+".m3u8"),
+			)
+		}
+	}
+	return args
 }
 
 // buildFFmpegChunkArgs 构造 chunk 模式的 ffmpeg 命令行
@@ -722,7 +838,10 @@ func ProbeSource(url string) (SourceProbe, error) {
 	args := []string{
 		"-v", "error",
 		"-protocol_whitelist", ProtocolWhitelistFor(url),
-		"-show_entries", "format=duration,size,bit_rate:stream=codec_type,codec_name,bit_rate,width,height",
+		"-show_entries",
+		"format=duration,size,bit_rate" +
+			":stream=index,codec_type,codec_name,bit_rate,width,height,channels" +
+			":stream_tags=language,title:stream_disposition=default",
 		"-of", "json",
 		url,
 	}
@@ -743,11 +862,20 @@ func ProbeSource(url string) (SourceProbe, error) {
 			BitRate  string `json:"bit_rate"`
 		} `json:"format"`
 		Streams []struct {
+			Index     int    `json:"index"`
 			CodecType string `json:"codec_type"`
 			CodecName string `json:"codec_name"`
 			BitRate   string `json:"bit_rate"`
 			Width     int    `json:"width"`
 			Height    int    `json:"height"`
+			Channels  int    `json:"channels"`
+			Tags      struct {
+				Language string `json:"language"`
+				Title    string `json:"title"`
+			} `json:"tags"`
+			Disposition struct {
+				Default int `json:"default"`
+			} `json:"disposition"`
 		} `json:"streams"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -757,16 +885,47 @@ func ProbeSource(url string) (SourceProbe, error) {
 	p.Duration, _ = strconv.ParseFloat(raw.Format.Duration, 64)
 	p.Size, _ = strconv.ParseInt(raw.Format.Size, 10, 64)
 	for _, s := range raw.Streams {
-		if s.CodecType == "video" && p.VideoCodec == "" {
-			p.VideoCodec = s.CodecName
-			p.Width = s.Width
-			p.Height = s.Height
-			p.VideoBitrate, _ = strconv.ParseInt(s.BitRate, 10, 64)
+		ti := TrackInfo{
+			Index:     s.Index,
+			CodecType: s.CodecType,
+			Codec:     s.CodecName,
+			Language:  s.Tags.Language,
+			Title:     s.Tags.Title,
+			Channels:  s.Channels,
+			Width:     s.Width,
+			Height:    s.Height,
+			Default:   s.Disposition.Default == 1,
 		}
-		if s.CodecType == "audio" && p.AudioCodec == "" {
-			p.AudioCodec = s.CodecName
-			p.AudioBitrate, _ = strconv.ParseInt(s.BitRate, 10, 64)
+		ti.Bitrate, _ = strconv.ParseInt(s.BitRate, 10, 64)
+		switch s.CodecType {
+		case "video":
+			if p.VideoCodec == "" {
+				p.VideoCodec = s.CodecName
+				p.Width = s.Width
+				p.Height = s.Height
+				p.VideoBitrate = ti.Bitrate
+			}
+			p.VideoTracks = append(p.VideoTracks, ti)
+		case "audio":
+			if p.AudioCodec == "" {
+				p.AudioCodec = s.CodecName
+				p.AudioBitrate = ti.Bitrate
+			}
+			p.AudioTracks = append(p.AudioTracks, ti)
+		case "subtitle":
+			ti.Textual = isTextSubtitleCodec(s.CodecName)
+			p.SubtitleTracks = append(p.SubtitleTracks, ti)
 		}
 	}
 	return p, nil
+}
+
+// isTextSubtitleCodec 判断字幕编码能否转换成 WebVTT 直接播放。
+// 图形字幕（PGS/DVD/VobSub）无法转文本，只能烧录，不在"直接字幕轨"范围内。
+func isTextSubtitleCodec(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "utf8", "microdvd", "subviewer", "subviewer1":
+		return true
+	}
+	return false
 }
