@@ -14,11 +14,11 @@ import (
 type JobStatus string
 
 const (
-	JobPending  JobStatus = "pending"  // 等待 Worker 领取
-	JobRunning  JobStatus = "running"  // Worker 已领取并在转码
-	JobReady    JobStatus = "ready"    // 至少首切片可用
-	JobFinished JobStatus = "finished" // 全部切片完成
-	JobFailed   JobStatus = "failed"
+	JobPending   JobStatus = "pending"  // 等待 Worker 领取
+	JobRunning   JobStatus = "running"  // Worker 已领取并在转码
+	JobReady     JobStatus = "ready"    // 至少首切片可用
+	JobFinished  JobStatus = "finished" // 全部切片完成
+	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
 )
 
@@ -44,6 +44,23 @@ const (
 	HWVideoToolbox HWAccel = "videotoolbox" // macOS
 )
 
+// TrackInfo 源文件中的一条轨道（由 ffprobe 得出）
+type TrackInfo struct {
+	Index     int    `json:"index"`      // ffprobe 容器内的 stream index
+	CodecType string `json:"codec_type"` // video / audio / subtitle
+	Codec     string `json:"codec"`      // h264 / hevc / aac / ac3 / dts / subrip ...
+	Language  string `json:"language,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Channels  int    `json:"channels,omitempty"`
+	Bitrate   int64  `json:"bitrate,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	Default   bool   `json:"default"`
+	// Textual 字幕轨是否为文本轨（可转成 WebVTT 直接播放）。
+	// PGS/DVD 图形字幕为 false，无法"直接字幕轨"。
+	Textual bool `json:"textual,omitempty"`
+}
+
 // SourceProbe 源文件探测信息（由 ffprobe 得出）
 type SourceProbe struct {
 	Duration     float64 `json:"duration"`      // 秒
@@ -54,18 +71,36 @@ type SourceProbe struct {
 	Height       int     `json:"height"`
 	AudioCodec   string  `json:"audio_codec"`
 	AudioBitrate int64   `json:"audio_bitrate"`
+
+	// 多轨信息：MKV 常见多条视频轨/音轨/内嵌字幕轨
+	VideoTracks    []TrackInfo `json:"video_tracks,omitempty"`
+	AudioTracks    []TrackInfo `json:"audio_tracks,omitempty"`
+	SubtitleTracks []TrackInfo `json:"subtitle_tracks,omitempty"`
 }
 
-// Profile 输出转码档位
+// Profile 输出转码档位（也用于表示多轨模式下的单条 rendition）
 type Profile struct {
-	Name         string `json:"name"`           // 例如 1080p
-	VideoCodec   string `json:"video_codec"`    // h264 / hevc / av1
-	VideoBitrate string `json:"video_bitrate"`  // 例如 4000k
-	Scale        string `json:"scale"`          // 例如 1920:-2
-	AudioCodec   string `json:"audio_codec"`    // aac / mp3 / opus / copy
-	AudioBitrate string `json:"audio_bitrate"`  // 例如 160k
-	HWAccel      string `json:"hwaccel"`        // worker 端如何选择硬件加速
+	Name         string `json:"name"`          // 例如 1080p / v0 / a1
+	VideoCodec   string `json:"video_codec"`   // h264 / hevc / av1
+	VideoBitrate string `json:"video_bitrate"` // 例如 4000k
+	Scale        string `json:"scale"`         // 例如 1920:-2
+	AudioCodec   string `json:"audio_codec"`   // aac / mp3 / opus / copy
+	AudioBitrate string `json:"audio_bitrate"` // 例如 160k
+	HWAccel      string `json:"hwaccel"`       // worker 端如何选择硬件加速
+
+	// 多轨模式：Kind 区分视频轨 / 音频轨 / 混流单档
+	Kind       string `json:"kind,omitempty"`        // muxed(单档音视频合一) / video / audio
+	TrackIndex int    `json:"track_index,omitempty"` // 源文件中的第几条同类轨道（0 起）
+	Language   string `json:"language,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Channels   int    `json:"channels,omitempty"`
 }
+
+// IsAudio 是否为独立的音频 rendition
+func (p Profile) IsAudio() bool { return p.Kind == "audio" }
+
+// IsVideo 是否为独立的视频 rendition
+func (p Profile) IsVideo() bool { return p.Kind == "video" }
 
 // OutputSpec 输出参数
 type OutputSpec struct {
@@ -75,13 +110,13 @@ type OutputSpec struct {
 
 // Job 一次转码任务
 type Job struct {
-	ID            string       `json:"id"`
-	Path          string       `json:"path"`           // OpenList 文件路径
-	SourceURL     string       `json:"source_url"`     // 提供给 Worker 的签名 URL
-	Probe         SourceProbe  `json:"probe"`
-	Profiles      []Profile    `json:"profiles"`
-	Output        OutputSpec   `json:"output"`
-	CallbackToken string       `json:"callback_token"` // Worker 回吐切片用（同时具备写权限，绝不外泄给播放端）
+	ID            string      `json:"id"`
+	Path          string      `json:"path"`       // OpenList 文件路径
+	SourceURL     string      `json:"source_url"` // 提供给 Worker 的签名 URL
+	Probe         SourceProbe `json:"probe"`
+	Profiles      []Profile   `json:"profiles"`
+	Output        OutputSpec  `json:"output"`
+	CallbackToken string      `json:"callback_token"` // Worker 回吐切片用（同时具备写权限，绝不外泄给播放端）
 	// PlayToken 播放凭据：只用于 master/variant playlist 与切片下发，
 	// 与 Worker 回写凭据（CallbackToken）分离，避免播放器拿到可写权限。
 	// json:"-" 保证下发给 Worker 的任务描述里不会包含它。
@@ -157,22 +192,22 @@ func (j *Job) WaitReady() <-chan struct{} { return j.readyCh }
 
 // Worker 节点信息
 type Worker struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Version       string    `json:"version"`
-	Capacity      int       `json:"capacity"`        // 最大并发任务数
-	HWAccel       []string  `json:"hwaccel"`         // 支持的硬件加速
-	CodecsDecode  []string  `json:"codecs_decode"`   // 可解码
-	CodecsEncode  []string  `json:"codecs_encode"`   // 可编码
-	MaxResolution string    `json:"max_resolution"`  // 最大分辨率
-	Tags          []string  `json:"tags"`
-	Endpoint      string    `json:"endpoint,omitempty"` // 反向连接地址（可选）
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Version       string   `json:"version"`
+	Capacity      int      `json:"capacity"`       // 最大并发任务数
+	HWAccel       []string `json:"hwaccel"`        // 支持的硬件加速
+	CodecsDecode  []string `json:"codecs_decode"`  // 可解码
+	CodecsEncode  []string `json:"codecs_encode"`  // 可编码
+	MaxResolution string   `json:"max_resolution"` // 最大分辨率
+	Tags          []string `json:"tags"`
+	Endpoint      string   `json:"endpoint,omitempty"` // 反向连接地址（可选）
 
 	// 运行时
-	Load        float64   `json:"load"`         // 0~1
-	Running     []string  `json:"running"`      // 当前 job_ids
-	FreeSlots   int       `json:"free_slots"`
-	LastSeen    time.Time `json:"last_seen"`
+	Load         float64   `json:"load"`    // 0~1
+	Running      []string  `json:"running"` // 当前 job_ids
+	FreeSlots    int       `json:"free_slots"`
+	LastSeen     time.Time `json:"last_seen"`
 	RegisteredAt time.Time `json:"registered_at"`
-	Local       bool      `json:"local"` // 是否本地内置 Worker
+	Local        bool      `json:"local"` // 是否本地内置 Worker
 }

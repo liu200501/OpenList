@@ -263,6 +263,12 @@ func workerCanRun(w *Worker, j *Job) bool {
 	if w.FreeSlots <= 0 {
 		return false
 	}
+	// 多轨任务（多视频轨/多音轨）目前只有内置 LocalRunner 支持：
+	// 远程 worker 的命令行只按单档位构造，认领后只会产出 v0 的切片，
+	// 其余 rendition 永远缺失，因此这里直接不派发给远端。
+	if !w.Local && len(j.Profiles) > 1 {
+		return false
+	}
 	if j.Probe.VideoCodec != "" && len(w.CodecsDecode) > 0 {
 		ok := false
 		for _, c := range w.CodecsDecode {

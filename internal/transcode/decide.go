@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -113,6 +114,7 @@ func BuildProfile() Profile {
 	}
 	return Profile{
 		Name:         name,
+		Kind:         "muxed",
 		VideoCodec:   setting.GetStr(conf.TranscodeOutputCodec),
 		VideoBitrate: setting.GetStr(conf.TranscodeOutputBitrate),
 		Scale:        scale,
@@ -120,6 +122,75 @@ func BuildProfile() Profile {
 		AudioBitrate: setting.GetStr(conf.TranscodeOutputAudioBitrate),
 		HWAccel:      setting.GetStr(conf.TranscodeHWAccel),
 	}
+}
+
+// BuildRenditions 根据探测到的轨道生成转码输出集合。
+//
+//   - 单视频轨 + 单音轨：保持历史行为，输出一个"音视频混流"的 HLS 档位（Kind=muxed）。
+//   - 多轨（MKV 常见）：输出
+//       v0..vN  每个视频轨一条纯视频 rendition（只做分辨率缩放 + 码率控制，不带音频）
+//       a0..aM  每个音轨一条纯音频 rendition（统一重编码为 AAC 立体声 48kHz）
+//     master playlist 用 EXT-X-MEDIA 音频组把它们组装起来，播放器即可切换音轨；
+//     切换视频轨等价于切换 HLS 的 variant（level）。
+func BuildRenditions(probe SourceProbe) []Profile {
+	return buildRenditions(probe, BuildProfile())
+}
+
+// buildRenditions 是 BuildRenditions 的纯函数版本，便于单测（不依赖设置库）。
+func buildRenditions(probe SourceProbe, base Profile) []Profile {
+	vTracks := probe.VideoTracks
+	aTracks := probe.AudioTracks
+	if len(vTracks) <= 1 && len(aTracks) <= 1 {
+		return []Profile{base}
+	}
+	var out []Profile
+	for i := range vTracks {
+		p := base
+		p.Name = "v" + strconv.Itoa(i)
+		p.Kind = "video"
+		p.TrackIndex = i
+		p.AudioCodec = ""
+		p.AudioBitrate = ""
+		p.Language = vTracks[i].Language
+		p.Title = vTracks[i].Title
+		out = append(out, p)
+	}
+	for i := range aTracks {
+		p := base
+		p.Name = "a" + strconv.Itoa(i)
+		p.Kind = "audio"
+		p.TrackIndex = i
+		p.VideoCodec = ""
+		p.VideoBitrate = ""
+		p.Scale = ""
+		// 统一转 AAC：浏览器 MSE 不支持 AC3/DTS/EAC3/TrueHD，也不支持 copy 原始音轨
+		p.AudioCodec = "aac"
+		p.AudioBitrate = audioBitrateFor(aTracks[i], base.AudioBitrate)
+		p.Channels = aTracks[i].Channels
+		p.Language = aTracks[i].Language
+		p.Title = aTracks[i].Title
+		out = append(out, p)
+	}
+	return out
+}
+
+// audioBitrateFor 按声道数给出合理的 AAC 码率；管理员显式配置了码率时优先用配置值。
+func audioBitrateFor(t TrackInfo, configured string) string {
+	if configured != "" && configured != "160k" {
+		return configured
+	}
+	switch {
+	case t.Channels >= 6:
+		return "320k"
+	case t.Channels == 2:
+		return "160k"
+	case t.Channels == 1:
+		return "96k"
+	}
+	if configured != "" {
+		return configured
+	}
+	return "160k"
 }
 
 // BuildOutputSpec 根据当前全局设置构建输出规格

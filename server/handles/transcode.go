@@ -203,8 +203,9 @@ func TranscodePlay(c *gin.Context) {
 		probe.Size = obj.GetSize()
 	}
 	job.Probe = probe
-	profile := transcode.BuildProfile()
-	job.Profiles = []transcode.Profile{profile}
+	// 按探测结果决定输出集合：单轨仍是历史的一档混流；多轨则拆成
+	// 每条视频轨一条纯视频 rendition + 每条音轨一条 AAC 音频 rendition。
+	job.Profiles = transcode.BuildRenditions(probe)
 	job.Output = transcode.BuildOutputSpec()
 	timeoutMin := setting.GetInt(conf.TranscodeJobTimeoutMin, 120)
 	job.Deadline = time.Now().Add(time.Duration(timeoutMin) * time.Minute).Unix()
@@ -223,13 +224,71 @@ func respondTranscodeJob(c *gin.Context, apiURL string, job *transcode.Job) {
 	if len(job.Profiles) > 0 {
 		profileName = job.Profiles[0].Name
 	}
-	masterURL := fmt.Sprintf("%s/tc/%s/%s/master.m3u8", apiURL, job.ID, job.PlayToken)
+	audioCount, videoCount := 0, 0
+	for _, p := range job.Profiles {
+		if p.IsAudio() {
+			audioCount++
+		} else if p.IsVideo() {
+			videoCount++
+		}
+	}
+	subtitles := make([]gin.H, 0, len(job.Probe.SubtitleTracks))
+	for i, s := range job.Probe.SubtitleTracks {
+		if !s.Textual {
+			continue
+		}
+		name := s.Title
+		if name == "" && s.Language != "" {
+			name = s.Language
+		}
+		if name == "" {
+			name = fmt.Sprintf("字幕 %d", i+1)
+		}
+		subtitles = append(subtitles, gin.H{
+			"index":    i,
+			"name":     name,
+			"language": s.Language,
+			"codec":    s.Codec,
+			"url":      fmt.Sprintf("%s/tc/%s/%s/sub/%d.vtt", apiURL, job.ID, job.PlayToken, i),
+		})
+	}
 	common.SuccessResp(c, gin.H{
 		"transcode":  true,
 		"job_id":     job.ID,
-		"master_url": masterURL,
+		"master_url": fmt.Sprintf("%s/tc/%s/%s/master.m3u8", apiURL, job.ID, job.PlayToken),
 		"profile":    profileName,
+		// 多轨信息供前端生成切换菜单；单轨时 audio/video 各自最多 1 条
+		"multi_track":  len(job.Profiles) > 1,
+		"audio_tracks": trackViews(job.Probe.AudioTracks, "音轨", audioCount),
+		"video_tracks": trackViews(job.Probe.VideoTracks, "视频轨", videoCount),
+		"subtitles":    subtitles,
 	})
+}
+
+// trackViews 把探测到的轨道转成前端可用的精简结构。
+// 多轨模式下 rendition 顺序与 map 输出顺序一致（v0..vN / a0..aM），
+// 前端用数组下标即可映射到 HLS 的 level / audioTrack。
+func trackViews(tracks []transcode.TrackInfo, fallback string, outCount int) []gin.H {
+	views := make([]gin.H, 0, len(tracks))
+	for i, t := range tracks {
+		name := t.Title
+		if name == "" && t.Language != "" {
+			name = t.Language
+		}
+		if name == "" {
+			name = fmt.Sprintf("%s %d", fallback, i+1)
+		}
+		views = append(views, gin.H{
+			"index":    i,
+			"name":     name,
+			"language": t.Language,
+			"codec":    t.Codec,
+			"channels": t.Channels,
+			"default":  t.Default,
+			"active":   i < outCount,
+		})
+	}
+	return views
 }
 
 func encodePath(p string) string {
@@ -308,7 +367,7 @@ func TCMaster(c *gin.Context) {
 	}
 	apiURL := common.GetApiUrlFromRequest(c.Request)
 	baseURL := fmt.Sprintf("%s/tc/%s/%s/", apiURL, jobID, token)
-	body := transcode.Default().Cache.MasterPlaylist(job.Profiles, baseURL)
+	body := transcode.Default().Cache.MasterPlaylist(job, baseURL)
 	job.Touch()
 	c.Header("Content-Type", "application/vnd.apple.mpegurl")
 	// Master playlist 内容在 job 生命周期内不变，设置较长缓存
@@ -425,7 +484,7 @@ func TCSegment(c *gin.Context) {
 	// 【智能调度】触发对应 chunk 的 ffmpeg 启动（如已运行则只更新 LastAccess）
 	// 这是用户拖动进度条到任意位置时能快速响应的关键。
 	// 配额已满时不能触发新的 ffmpeg，否则「限制并发」就没有意义了。
-	if mgr.Chunks != nil && !quotaBlocked {
+	if mgr.Chunks != nil && !quotaBlocked && len(job.Profiles) == 1 {
 		chunkIdx := mgr.Chunks.EnsureChunkRunningForSeg(jobID, profile, seq)
 		fmt.Printf("[tc-segment] req seq=%d chunk=%d job=%s\n", seq, chunkIdx, jobID)
 	}
@@ -464,6 +523,44 @@ func TCSegment(c *gin.Context) {
 		return
 	}
 	c.DataFromReader(http.StatusOK, fi.Size(), "video/mp2t", f, nil)
+}
+
+// TCSubtitle GET /tc/:job/:token/sub/:name   直接把内嵌字幕轨转成 WebVTT 返回
+//
+// 只支持文本字幕（SRT/ASS/SSA/MOV_TEXT），PGS/DVD 图形字幕会返回 422。
+// 生成结果缓存在 job 目录里，同一字幕轨只会跑一次 ffmpeg。
+func TCSubtitle(c *gin.Context) {
+	jobID := c.Param("job")
+	token := c.Param("token")
+	name := c.Param("name")
+	job, ok := transcode.Default().Scheduler.Get(jobID)
+	if !ok {
+		c.String(http.StatusNotFound, "job not found")
+		return
+	}
+	if !tokenMatches(job.PlayToken, token) {
+		c.String(http.StatusForbidden, "bad token")
+		return
+	}
+	ordinal, ok := transcode.ParseSubtitleOrdinal(name)
+	if !ok {
+		c.String(http.StatusBadRequest, "bad subtitle name")
+		return
+	}
+	dir, err := transcode.Default().Cache.JobDir(jobID)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+	path, err := transcode.EnsureSubtitle(job, ordinal, dir)
+	if err != nil {
+		c.String(http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	job.Touch()
+	c.Header("Content-Type", "text/vtt; charset=utf-8")
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.File(path)
 }
 
 // ============================================================

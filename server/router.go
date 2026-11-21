@@ -71,6 +71,7 @@ func Init(e *gin.Engine) {
 
 	// 转码播放：master/variant playlist 与切片下发；token 已包含在路径中作为鉴权
 	g.GET("/tc/:job/:token/master.m3u8", handles.TCMaster)
+	g.GET("/tc/:job/:token/sub/:name", handles.TCSubtitle)
 	g.GET("/tc/:job/:token/:profile/playlist.m3u8", handles.TCPlaylist)
 	g.GET("/tc/:job/:token/:profile/:seg", handles.TCSegment)
 
