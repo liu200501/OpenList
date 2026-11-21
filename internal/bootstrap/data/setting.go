@@ -310,6 +310,10 @@ func InitialSettings() []model.SettingItem {
 		// transcode settings (FFmpeg 云端/本地转码) - 默认全部关闭
 		{Key: conf.TranscodeEnabled, Value: "false", Type: conf.TypeBool, Group: model.TRANSCODE, Flag: model.PRIVATE,
 			Help: `开启后，超过阈值的媒体文件将通过 FFmpeg 转码后再播放；默认关闭`},
+		{Key: conf.TranscodeVideoEnabled, Value: "true", Type: conf.TypeBool, Group: model.TRANSCODE, Flag: model.PRIVATE,
+			Help: `视频轨单独转码开关：开启时按"输出视频编码/码率/分辨率"重新编码；关闭时视频流直接 copy（不重编码、不缩放），可与音频转码独立控制`},
+		{Key: conf.TranscodeAudioEnabled, Value: "true", Type: conf.TypeBool, Group: model.TRANSCODE, Flag: model.PRIVATE,
+			Help: `音频轨单独转码开关：开启时按"输出音频编码"重新编码（多轨模式统一转 AAC）；关闭时音频流直接 copy（保留源编码），可与视频转码独立控制`},
 		{Key: conf.TranscodeRunMode, Value: "local", Type: conf.TypeSelect, Options: "local,remote,hybrid", Group: model.TRANSCODE, Flag: model.PRIVATE,
 			Help: `local=仅使用本机内置 worker；remote=只使用远程 Worker 节点；hybrid=本地优先，超载后派发到远程`},
 		{Key: conf.TranscodeMinSizeGB, Value: "5", Type: conf.TypeNumber, Group: model.TRANSCODE, Flag: model.PRIVATE,

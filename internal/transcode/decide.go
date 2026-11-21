@@ -21,10 +21,21 @@ type DecideResult struct {
 	Reason        string
 }
 
-// Decide 根据全局设置判断是否需要走转码
+// Decide 根据全局设置判断是否需要走转码。
+//
+// 视频轨与音频轨各自独立判断：
+//   - 总开关关闭时不转码；
+//   - 视频/音频转码开关同时关闭时也没有转码的必要；
+//   - 编码/后缀/码率等文件级过滤仍按全局设置执行（探测信息可用时见 DecideTracks）。
 func Decide(r DecideRequest) DecideResult {
 	if !setting.GetBool(conf.TranscodeEnabled) {
 		return DecideResult{false, "transcode disabled"}
+	}
+	videoOn := trackTranscodeEnabled(conf.TranscodeVideoEnabled)
+	audioOn := trackTranscodeEnabled(conf.TranscodeAudioEnabled)
+	// 开关默认值为 true；只有两路都被显式关闭时才完全跳过转码。
+	if !videoOn && !audioOn {
+		return DecideResult{false, "video and audio transcoding both disabled"}
 	}
 	// 1. 大小阈值
 	minGB := setting.GetInt(conf.TranscodeMinSizeGB, 5)
@@ -42,21 +53,30 @@ func Decide(r DecideRequest) DecideResult {
 			return DecideResult{false, "extension not in list"}
 		}
 	}
-	// 3. 编码过滤（仅当 probe 提供时）
+	// 3. 编码过滤（仅当 probe 提供、且视频转码开启时）
+	// 视频转码关闭时视频流走 copy，源编码是否兼容不影响是否转码。
 	codecs := splitCSV(setting.GetStr(conf.TranscodeSourceCodecs))
-	if r.Probe.VideoCodec != "" && len(codecs) > 0 {
+	if videoOn && r.Probe.VideoCodec != "" && len(codecs) > 0 {
 		if !containsFold(codecs, r.Probe.VideoCodec) {
 			return DecideResult{false, "codec not in list"}
 		}
 	}
-	// 4. 码率过滤（仅当 probe 提供时）
+	// 4. 码率过滤（仅当 probe 提供、且视频转码开启时）
 	minBR := setting.GetInt(conf.TranscodeMinBitrateMbps, 0)
-	if minBR > 0 && r.Probe.VideoBitrate > 0 {
+	if videoOn && minBR > 0 && r.Probe.VideoBitrate > 0 {
 		if r.Probe.VideoBitrate < int64(minBR)*1_000_000 {
 			return DecideResult{false, "bitrate below threshold"}
 		}
 	}
 	return DecideResult{true, "ok"}
+}
+
+// trackTranscodeEnabled 读取视频/音频转码开关，缺省为开启。
+// 用 GetStr 的默认值而非 GetBool：老部署数据库里还没有这两个 key 时，
+// 应视为"默认开启"，避免升级后视频/音频意外全部变成 copy。
+func trackTranscodeEnabled(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(setting.GetStr(key, "true")))
+	return v == "true" || v == "1"
 }
 
 func splitCSV(s string) []string {
@@ -112,13 +132,25 @@ func BuildProfile() Profile {
 		scale = "854:-2"
 		name = "480p"
 	}
+	// 视频/音频转码开关独立生效：关掉的那一路使用 copy（保留源编码、不缩放/不重编码）。
+	videoCodec := setting.GetStr(conf.TranscodeOutputCodec)
+	videoBitrate := setting.GetStr(conf.TranscodeOutputBitrate)
+	audioCodec := setting.GetStr(conf.TranscodeOutputAudioCodec)
+	if !trackTranscodeEnabled(conf.TranscodeVideoEnabled) {
+		videoCodec = "copy"
+		videoBitrate = ""
+		scale = ""
+	}
+	if !trackTranscodeEnabled(conf.TranscodeAudioEnabled) {
+		audioCodec = "copy"
+	}
 	return Profile{
 		Name:         name,
 		Kind:         "muxed",
-		VideoCodec:   setting.GetStr(conf.TranscodeOutputCodec),
-		VideoBitrate: setting.GetStr(conf.TranscodeOutputBitrate),
+		VideoCodec:   videoCodec,
+		VideoBitrate: videoBitrate,
 		Scale:        scale,
-		AudioCodec:   setting.GetStr(conf.TranscodeOutputAudioCodec),
+		AudioCodec:   audioCodec,
 		AudioBitrate: setting.GetStr(conf.TranscodeOutputAudioBitrate),
 		HWAccel:      setting.GetStr(conf.TranscodeHWAccel),
 	}
@@ -163,9 +195,12 @@ func buildRenditions(probe SourceProbe, base Profile) []Profile {
 		p.VideoCodec = ""
 		p.VideoBitrate = ""
 		p.Scale = ""
-		// 统一转 AAC：浏览器 MSE 不支持 AC3/DTS/EAC3/TrueHD，也不支持 copy 原始音轨
-		p.AudioCodec = "aac"
-		p.AudioBitrate = audioBitrateFor(aTracks[i], base.AudioBitrate)
+		// 音频转码开关关闭时保留源编码（copy）；开启时统一转 AAC，
+		// 因为浏览器 MSE 不支持 AC3/DTS/EAC3/TrueHD 等原始音轨。
+		if p.AudioCodec != "copy" {
+			p.AudioCodec = "aac"
+			p.AudioBitrate = audioBitrateFor(aTracks[i], base.AudioBitrate)
+		}
 		p.Channels = aTracks[i].Channels
 		p.Language = aTracks[i].Language
 		p.Title = aTracks[i].Title

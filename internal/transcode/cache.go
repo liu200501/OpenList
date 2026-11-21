@@ -368,7 +368,11 @@ func (c *Cache) MasterPlaylist(job *Job, baseURL string) string {
 		// 错误的 codec 声明会导致 HLS.js 用错误参数初始化 SourceBuffer
 		// 然后 appendBuffer 时数据格式不匹配 → bufferAppendError 死循环
 		codecs := buildCodecString(p)
-		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=\"%s\"\n", bw+ab, codecs))
+		if codecs != "" {
+			b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=\"%s\"\n", bw+ab, codecs))
+		} else {
+			b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d\n", bw+ab))
+		}
 		b.WriteString(fmt.Sprintf("%s%s/playlist.m3u8\n", baseURL, p.Name))
 		return b.String()
 	}
@@ -407,7 +411,10 @@ func (c *Cache) MasterPlaylist(job *Job, baseURL string) string {
 		bw, _ := parseBitrate(p.VideoBitrate)
 		codecs := buildCodecString(p)
 		var attrs strings.Builder
-		attrs.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=\"%s\"", bw+maxAudioBr, codecs))
+		attrs.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d", bw+maxAudioBr))
+		if codecs != "" {
+			attrs.WriteString(fmt.Sprintf(",CODECS=\"%s\"", codecs))
+		}
 		if len(audios) > 0 {
 			attrs.WriteString(",AUDIO=\"aud\"")
 		}
@@ -459,17 +466,30 @@ func (c *Cache) JobDir(jobID string) (string, error) {
 // avc1.640028 = H.264 High Profile Level 4.0
 // mp4a.40.2 = AAC-LC（HE-AAC v1 用 mp4a.40.5，HE-AAC v2 用 mp4a.40.29）
 func buildCodecString(p Profile) string {
-	// 视频部分：默认 H.264 Main Profile Level 4.0，平衡兼容性与质量
-	video := "avc1.4D4028"
+	// 视频部分：copy 时源编码未知，不声明（避免 CODECS 与实际不符导致
+	// HLS.js SourceBuffer 初始化失败）。重编码时按输出编码声明。
+	video := ""
 	switch strings.ToLower(p.VideoCodec) {
+	case "copy":
+		// 不声明视频 codec
 	case "hevc", "h265":
-		// HEVC Main Profile Level 4.1，部分 Safari/Edge 支持
 		video = "hvc1.1.6.L120.90"
 	case "av1":
 		video = "av01.0.05M.08"
+	default:
+		video = "avc1.4D4028"
 	}
-	// 音频部分：固定 AAC-LC（后端已强制转 AAC）
-	audio := "mp4a.40.2"
+	// 音频部分：copy 时不声明；重编码统一 AAC-LC。
+	audio := ""
+	if strings.ToLower(p.AudioCodec) != "copy" {
+		audio = "mp4a.40.2"
+	}
+	if video == "" {
+		return audio
+	}
+	if audio == "" {
+		return video
+	}
 	return video + "," + audio
 }
 

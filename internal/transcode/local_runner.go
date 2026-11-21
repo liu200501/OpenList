@@ -682,45 +682,49 @@ func buildFFmpegArgsCommon(job *Job, profile Profile, segDur int, startTime, dur
 	// 视频编码器
 	vcodec := pickEncoder(profile.VideoCodec, hw)
 	args = append(args, "-c:v", vcodec)
-	// 【关键】强制浏览器兼容的 profile/level/pix_fmt，必须与 master.m3u8 声明的
-	// CODECS="avc1.640028" (H.264 High Profile Level 4.0) 一致，否则 HLS.js 会触发
-	// bufferAppendError 死循环。
-	if strings.Contains(vcodec, "264") {
-		args = append(args, "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p")
-	}
-	if profile.VideoBitrate != "" {
-		args = append(args, "-b:v", profile.VideoBitrate)
-		args = append(args, "-maxrate", profile.VideoBitrate, "-bufsize", profile.VideoBitrate)
-	}
-	if profile.Scale != "" {
-		// 软件 / 硬件缩放
-		switch hw {
-		case "vaapi":
-			args = append(args, "-vf", "scale_vaapi="+profile.Scale)
-		case "qsv":
-			args = append(args, "-vf", "scale_qsv="+profile.Scale)
-		default:
-			args = append(args, "-vf", "scale="+profile.Scale)
+	// 视频转码开关关闭（copy）时不带任何重编码参数，直接透传源视频流。
+	if vcodec != "copy" {
+		// 【关键】强制浏览器兼容的 profile/level/pix_fmt，必须与 master.m3u8 声明的
+		// CODECS="avc1.640028" (H.264 High Profile Level 4.0) 一致，否则 HLS.js 会触发
+		// bufferAppendError 死循环。
+		if strings.Contains(vcodec, "264") {
+			args = append(args, "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p")
 		}
+		if profile.VideoBitrate != "" {
+			args = append(args, "-b:v", profile.VideoBitrate)
+			args = append(args, "-maxrate", profile.VideoBitrate, "-bufsize", profile.VideoBitrate)
+		}
+		if profile.Scale != "" {
+			// 软件 / 硬件缩放
+			switch hw {
+			case "vaapi":
+				args = append(args, "-vf", "scale_vaapi="+profile.Scale)
+			case "qsv":
+				args = append(args, "-vf", "scale_qsv="+profile.Scale)
+			default:
+				args = append(args, "-vf", "scale="+profile.Scale)
+			}
+		}
+		args = append(args, "-preset", defaultPresetFor(vcodec))
 	}
-	args = append(args, "-preset", defaultPresetFor(vcodec))
 
 	// 音频
-	// 【关键修复】不能使用 -c:a copy，因为浏览器 MSE 不支持 AC3/DTS/EAC3/TrueHD 等
-	// 常见于 mkv 的音频编码。直接 copy 会导致 SourceBuffer.appendBuffer 失败
-	// 触发 bufferAppendError 死循环。统一强制转 AAC 兼容所有浏览器。
+	// 缺省（老任务 profile 不带音频编码）时统一强制转 AAC，因为浏览器 MSE 不支持
+	// AC3/DTS/EAC3/TrueHD；但管理员显式关闭音频转码时会传入 "copy"，此时保留源编码。
 	ac := profile.AudioCodec
-	if ac == "" || ac == "copy" {
+	if ac == "" {
 		ac = "aac"
 	}
 	args = append(args, "-c:a", ac)
-	ab := profile.AudioBitrate
-	if ab == "" {
-		ab = "160k"
+	if ac != "copy" {
+		ab := profile.AudioBitrate
+		if ab == "" {
+			ab = "160k"
+		}
+		args = append(args, "-b:a", ab)
+		// 强制立体声 + 48kHz，避免 5.1 声道 / 高采样率导致的兼容问题
+		args = append(args, "-ac", "2", "-ar", "48000")
 	}
-	args = append(args, "-b:a", ab)
-	// 强制立体声 + 48kHz，避免 5.1 声道 / 高采样率导致的兼容问题
-	args = append(args, "-ac", "2", "-ar", "48000")
 
 	// HLS 输出
 	if segDur <= 0 {
@@ -763,6 +767,8 @@ func buildFFmpegArgsCommon(job *Job, profile Profile, segDur int, startTime, dur
 func pickEncoder(codec, hw string) string {
 	codec = strings.ToLower(codec)
 	switch codec {
+	case "copy":
+		return "copy"
 	case "h264", "":
 		switch hw {
 		case "nvenc":

@@ -488,18 +488,21 @@ func buildFFmpegArgs(job Job, profile Profile, segPattern, playlist string) []st
 	// -protocol_whitelist 是输入选项，必须位于 -i 之前。
 	args = append(args, "-protocol_whitelist", protocolWhitelistFor(job.SourceURL))
 	args = append(args, "-i", job.SourceURL)
-	args = append(args, "-c:v", pickEncoder(profile.VideoCodec, hw))
-	if profile.VideoBitrate != "" {
-		args = append(args, "-b:v", profile.VideoBitrate, "-maxrate", profile.VideoBitrate, "-bufsize", profile.VideoBitrate)
-	}
-	if profile.Scale != "" {
-		switch hw {
-		case "vaapi":
-			args = append(args, "-vf", "scale_vaapi="+profile.Scale)
-		case "qsv":
-			args = append(args, "-vf", "scale_qsv="+profile.Scale)
-		default:
-			args = append(args, "-vf", "scale="+profile.Scale)
+	vcodec := pickEncoder(profile.VideoCodec, hw)
+	args = append(args, "-c:v", vcodec)
+	if vcodec != "copy" {
+		if profile.VideoBitrate != "" {
+			args = append(args, "-b:v", profile.VideoBitrate, "-maxrate", profile.VideoBitrate, "-bufsize", profile.VideoBitrate)
+		}
+		if profile.Scale != "" {
+			switch hw {
+			case "vaapi":
+				args = append(args, "-vf", "scale_vaapi="+profile.Scale)
+			case "qsv":
+				args = append(args, "-vf", "scale_qsv="+profile.Scale)
+			default:
+				args = append(args, "-vf", "scale="+profile.Scale)
+			}
 		}
 	}
 	if profile.AudioCodec == "copy" {
@@ -532,6 +535,8 @@ func buildFFmpegArgs(job Job, profile Profile, segPattern, playlist string) []st
 func pickEncoder(codec, hw string) string {
 	codec = strings.ToLower(codec)
 	switch codec {
+	case "copy":
+		return "copy"
 	case "h264", "":
 		switch hw {
 		case "nvenc":

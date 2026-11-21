@@ -12,7 +12,7 @@ func testBase() Profile {
 		VideoCodec:   "h264",
 		VideoBitrate: "4000k",
 		Scale:        "1920:-2",
-		AudioCodec:   "copy",
+		AudioCodec:   "aac",
 		AudioBitrate: "160k",
 	}
 }
@@ -102,5 +102,55 @@ func TestParseSubtitleOrdinal(t *testing.T) {
 	}
 	if _, ok := ParseSubtitleOrdinal("../x.vtt"); ok {
 		t.Fatal("should reject path traversal")
+	}
+}
+
+// 视频/音频转码开关关闭时，buildRenditions 应尊重 base 里的 copy 设置，
+// 不再把音轨强制转成 AAC，也不给视频轨附加视频编码参数。
+func TestBuildRenditionsCopyTracks(t *testing.T) {
+	base := testBase()
+	base.VideoCodec = "copy"
+	base.VideoBitrate = ""
+	base.Scale = ""
+	base.AudioCodec = "copy"
+	probe := SourceProbe{
+		VideoTracks: []TrackInfo{{Index: 0, CodecType: "video", Codec: "hevc"}},
+		AudioTracks: []TrackInfo{{Index: 1, CodecType: "audio", Codec: "dts", Channels: 6}},
+	}
+	got := buildRenditions(probe, base)
+	// 单视频 + 单音频保持 muxed 历史行为（1 个 rendition）；copy 开关只影响编码字段。
+	if len(got) != 1 {
+		t.Fatalf("want 1 muxed rendition, got %d", len(got))
+	}
+	if got[0].VideoCodec != "copy" || got[0].AudioCodec != "copy" {
+		t.Fatalf("both tracks should stay copy: %+v", got[0])
+	}
+}
+
+func TestBuildRenditionsMultiTrackCopyAudio(t *testing.T) {
+	base := testBase()
+	base.AudioCodec = "copy" // 音频转码关闭
+	probe := SourceProbe{
+		VideoTracks: []TrackInfo{
+			{Index: 0, CodecType: "video", Codec: "h264"},
+			{Index: 1, CodecType: "video", Codec: "hevc"},
+		},
+		AudioTracks: []TrackInfo{
+			{Index: 2, CodecType: "audio", Codec: "dts", Channels: 6},
+		},
+	}
+	got := buildRenditions(probe, base)
+	// 找到音频 rendition，确认没有被强制改成 aac。
+	found := false
+	for _, p := range got {
+		if p.IsAudio() {
+			found = true
+			if p.AudioCodec != "copy" {
+				t.Fatalf("audio transcode off should keep copy, got %s", p.AudioCodec)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no audio rendition produced")
 	}
 }
