@@ -9,6 +9,7 @@ package _139
 //          IBatchOprTask/createOuterLinkBatchOprTask、queryBatchOprTaskDetail）。
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -23,24 +24,59 @@ const shareBaseURL = "https://share-kd-njs.yun.139.com/yun-share"
 // sharePlainPost 调用不加密的分享 API（getOutLink / subOutLink 走明文 JSON）。
 // 使用 d 自身的账号授权（d.getAuthorization() / d.getAccount()），
 // 因此源、目标账号各用各的驱动实例调用即可。
+//
+// 注意：139 有时会把整个响应 JSON 再编码成一个 JSON 字符串（双重编码），
+// resty 的 SetResult 只解析一层会报 "cannot unmarshal string into Go value"。
+// 因此这里不让 resty 自动解析，改为拿到原始 body 后手动兼容两种形态。
 func (d *Yun139) sharePlainPost(pathname string, data interface{}, resp interface{}) ([]byte, error) {
 	url := shareBaseURL + pathname
-	req := base.RestyClient.R().
+	r, err := base.RestyClient.R().
 		SetHeaders(d.shareHeaders()).
 		SetHeader("Content-Type", "application/json;charset=UTF-8").
-		SetBody(data)
-	if resp != nil {
-		req.SetResult(resp)
-	}
-	r, err := req.Post(url)
+		SetBody(data).
+		Post(url)
 	if err != nil {
 		return nil, err
 	}
 	if r.StatusCode() != http.StatusOK {
 		return nil, fmt.Errorf("139 share request %s: status %d: %s", pathname, r.StatusCode(), r.String())
 	}
-	log.Debugf("[139Transfer] plain post %s resp: %s", pathname, r.String())
-	return r.Body(), nil
+	body := r.Body()
+	log.Debugf("[139Transfer] plain post %s resp: %s", pathname, string(body))
+	if resp == nil {
+		return body, nil
+	}
+	if err := unmarshalShareResp(body, resp); err != nil {
+		return body, err
+	}
+	return body, nil
+}
+
+// unmarshalShareResp 解析分享接口响应，兼容"对象"与"双重编码的字符串"两种形态。
+func unmarshalShareResp(body []byte, out interface{}) error {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return fmt.Errorf("139 share response is empty")
+	}
+	// 先按标准对象解析。
+	if err := json.Unmarshal([]byte(trimmed), out); err == nil {
+		return nil
+	}
+	// 顶层是 JSON 字符串（body = "\"{...}\""）：先解出里面的字符串，再解一次。
+	var inner string
+	if err := json.Unmarshal([]byte(trimmed), &inner); err == nil {
+		inner = strings.TrimSpace(inner)
+		if err2 := json.Unmarshal([]byte(inner), out); err2 != nil {
+			return fmt.Errorf("139 share double-encoded response is not parseable: %w; inner=%s", err2, inner)
+		}
+		return nil
+	}
+	// 都不行，返回原始错误，便于排查。
+	var probe interface{}
+	if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
+		return fmt.Errorf("139 share response is not valid json: %w; body=%s", err, trimmed)
+	}
+	return fmt.Errorf("139 share response shape is unexpected; body=%s", trimmed)
 }
 
 // createOutLink 由源账号（d == 源驱动）为指定的文件夹/文件创建分享。
